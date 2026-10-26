@@ -1,5 +1,5 @@
-const CACHE = 'd-shift-v6';
-const ASSETS = ['./', './index.html', './styles.css?v=6', './app.js?v=6', './manifest.webmanifest', './icon.svg'];
+const CACHE = 'd-shift-v7';
+const ASSETS = ['./', './index.html', './styles.css?v=6', './app.js?v=7', './quotes.js?v=1', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
@@ -25,16 +25,17 @@ self.addEventListener('push', event => {
   }));
 });
 self.addEventListener('notificationclick', event => {
+  const url = event.notification.data?.url || './';
   event.notification.close();
   event.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-    if (list.length) return list[0].focus();
-    return clients.openWindow('./');
+    if (list.length) { list[0].navigate(url); return list[0].focus(); }
+    return clients.openWindow(url);
   }));
 });
 self.addEventListener('message', event => {
   if (event.data?.type === 'notify') {
     event.waitUntil(self.registration.showNotification(event.data.title, {
-      body: event.data.body, icon: './icon.svg', badge: './icon.svg', tag: event.data.tag || 'd-shift'
+      body: event.data.body, icon: './icon.svg', badge: './icon.svg', tag: event.data.tag || 'd-shift', data: event.data.data || { url: './' }
     }));
   }
 });

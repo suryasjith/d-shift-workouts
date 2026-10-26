@@ -1,3 +1,5 @@
+import { getDailyQuote } from './quotes.js?v=1';
+
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const todayKey = (date = new Date()) => {
@@ -11,7 +13,8 @@ const round = (value, places = 0) => value == null ? '—' : Number(value).toFix
 const prettyDate = (key, options = { weekday: 'long', day: 'numeric', month: 'long' }) => new Intl.DateTimeFormat('en-GB', options).format(dateFromKey(key));
 const keyForOffset = offset => { const date = dateFromKey(todayKey()); date.setDate(date.getDate() + offset); return todayKey(date); };
 const notify = message => { const toast = $('#toast'); if (!toast) return; toast.textContent = message; toast.classList.add('show'); clearTimeout(notify.timer); notify.timer = setTimeout(() => toast.classList.remove('show'), 2400); };
-const remindersNeedAction = () => 'Notification' in window && Notification.permission !== 'granted';
+const notificationsGranted = () => 'Notification' in window && Notification.permission === 'granted';
+const remindersNeedAction = () => 'Notification' in window && !notificationsGranted();
 
 const DB_NAME = 'd-shift-workouts';
 const DB_VERSION = 1;
@@ -34,10 +37,10 @@ const idbDelete = (store, id) => new Promise((resolve, reject) => { const reques
 
 const state = {
   tab: 'today', profile: null, settings: { shifts: {}, rotaAnchor: null }, today: {}, weights: [], activities: [], sessions: [],
-  foodResults: [], foodQuery: '', selectedFood: null, fuelSearchTimer: null, foodRequestId: 0, activitySubtab: 'overview', sessionStarted: null,
+  foodResults: [], foodQuery: '', selectedFood: null, foodQuantity: '', foodUnit: 'g', fuelSearchTimer: null, foodRequestId: 0, activitySubtab: 'overview', sessionStarted: null,
   rotaOpen: false, rotaWindow: 0,
   restTimer: 0, restInterval: null,
-  modalReturnFocus: null, modalKeyHandler: null, foodActiveIndex: -1
+  modalReturnFocus: null, modalKeyHandler: null, foodActiveIndex: -1, notificationInterval: null, quoteTimeout: null
 };
 const FOOD_FALLBACKS = [
   { name: 'Chicken breast', calories: 165, protein: 31, carbs: 0, fats: 3.6 },
@@ -75,7 +78,10 @@ const getWorkout = (key = todayKey()) => getShift(key) === 'Work'
   : { mode: 'off', muscle: 'Full body strength', duration: 52, title: 'Full body strength', exercises: [{ name: 'Goblet squat', alternate: 'Leg press', sets: 3 }, { name: 'Dumbbell bench press', alternate: 'Push-up', sets: 3 }, { name: 'Romanian deadlift', alternate: 'Cable pull-through', sets: 3 }, { name: 'Seated row', alternate: 'Inverted row', sets: 3 }] };
 const adjustedWorkout = () => { const workout = getWorkout(); const fatigue = number(state.today.fatigue); if (fatigue >= 8) return { ...workout, duration: Math.round(workout.duration * .65), title: `${workout.title} · reduced volume`, exercises: workout.exercises.slice(0, Math.max(2, Math.ceil(workout.exercises.length * .65))) }; return workout; };
 const logForToday = () => state.today;
-const macroConsumed = key => (state.today.foods || []).reduce((total, food) => ({ calories: total.calories + (food.calories || 0), protein: total.protein + (food.protein || 0), carbs: total.carbs + (food.carbs || 0), fats: total.fats + (food.fats || 0) }), { calories: 0, protein: 0, carbs: 0, fats: 0 });
+const UNIT_TO_GRAMS = { g: 1, oz: 28.349523125 };
+const foodGrams = food => { const quantity = number(food.quantity ?? 100); const multiplier = UNIT_TO_GRAMS[food.unit || 'g']; return quantity > 0 && multiplier ? quantity * multiplier : 0; };
+const scaledFoodMacros = food => { const factor = foodGrams(food) / 100; return { calories: (Number(food.calories) || 0) * factor, protein: (Number(food.protein) || 0) * factor, carbs: (Number(food.carbs) || 0) * factor, fats: (Number(food.fats) || 0) * factor }; };
+const macroConsumed = key => (state.today.foods || []).reduce((total, food) => { const scaled = scaledFoodMacros(food); return { calories: total.calories + scaled.calories, protein: total.protein + scaled.protein, carbs: total.carbs + scaled.carbs, fats: total.fats + scaled.fats }; }, { calories: 0, protein: 0, carbs: 0, fats: 0 });
 const saveToday = async () => { state.today.id = todayKey(); await idbPut('dailyLogs', state.today); };
 
 function icon(name) { return ({ today: '⌂', workout: '◒', fuel: '◉', progress: '↗' }[name] || '•'); }
@@ -97,7 +103,8 @@ function renderToday() {
   const waterTarget = profile ? 8 : 0;
   const water = state.today.water || 0;
   return `${topbar('Today', 'D-SHIFT WORKOUTS', 'Today')}
-    ${!profile ? `<section class="card empty-state"><div class="setup-mark">D</div><strong>Build your shift-ready plan</strong><p>Press the button below to enter your profile. Your targets, workout routing and timeline will be calculated from it.</p><button class="primary-button" data-action="profile">Set up my profile</button></section>` : ''}${remindersNeedAction() ? `<section class="card"><div class="split"><div><div class="section-label">Stay on time</div><strong>Meal and hydration reminders</strong><p style="font-size:12px">Allow notifications for 12 PM lunch, 5 PM dinner and interval water checks.</p></div><button class="secondary-button small-button" data-action="notifications">Enable</button></div></section>` : ''}
+    ${!profile ? `<section class="card empty-state"><div class="setup-mark">D</div><strong>Build your shift-ready plan</strong><p>Press the button below to enter your profile. Your targets, workout routing and timeline will be calculated from it.</p><button class="primary-button" data-action="profile">Set up my profile</button></section>` : ''}${remindersNeedAction() ? `<section class="card"><div class="split"><div><div class="section-label">Stay on time</div><strong>Meal and hydration reminders</strong><p style="font-size:12px">Allow notifications for lunch, dinner, hydration, and one daily quote at 8:00 AM while D-Shift is active.</p></div><button class="secondary-button small-button" data-action="notifications">Enable</button></div></section>` : ''}
+    <section class="card quote-card"><div class="section-label">Daily boost</div><blockquote>“${esc(getDailyQuote(todayKey()).text)}”</blockquote><p class="quote-author">— ${esc(getDailyQuote(todayKey()).author)}</p><div class="split quote-status"><span>${notificationsGranted() ? 'Daily quote notifications enabled' : 'Quote shown here every day'}</span>${notificationsGranted() ? '<span class="pill">8:00 AM</span>' : ''}</div></section>
     <section class="card readiness-card"><div class="card-header"><div><div class="section-label">Readiness check</div><h2>How do you feel?</h2></div><span class="pill">${fatigue ? `RPE ${fatigue}/10` : 'Not logged'}</span></div><p>One quick score tells D-Shift how much training your shift can support today.</p><div class="rpe-wrap"><input id="fatigue" type="range" min="1" max="10" step="1" aria-label="Fatigue, 1 to 10" ${fatigue ? `value="${fatigue}"` : ''}><div class="range-labels"><span>Fresh · 1</span><span>Wrecked · 10</span></div></div></section>
     <section class="card command-card"><div class="command-kicker"><span class="section-label">Your next move</span><span class="pill">${getShift(todayKey())} day</span></div><div class="command-title"><h2>${profile ? workout.title : 'Your shift-ready plan'}</h2><span class="command-arrow">→</span></div>${profile ? `<p>${esc(workout.muscle)} · ${workout.duration} minutes${fatigue >= 8 ? ' · volume reduced for recovery' : ''}</p><button class="primary-button" style="margin-top:14px" data-action="tab" data-tab="workout">Open workout</button>` : `<div class="empty-state"><strong>Start with your profile</strong><p>Press “Set up my profile” above and D-Shift will route your training around work.</p></div>`}</section>
     ${profile ? renderProfileSummary() : ''}<section class="card"><div class="card-header"><div><div class="section-label">Daily fuel</div><h2>Remaining macros</h2></div><button class="icon-button" data-action="tab" data-tab="fuel" aria-label="Open fuel">→</button></div>${profile ? `<div class="metric-grid"><div class="metric"><strong>${Math.max(0, targets.calories - consumed.calories)}</strong><span>kcal</span></div><div class="metric"><strong>${Math.max(0, targets.protein - consumed.protein)}g</strong><span>protein</span></div><div class="metric"><strong>${Math.max(0, targets.carbs - consumed.carbs)}g</strong><span>carbs</span></div></div>` : `<p>Set up your profile to calculate your macro targets.</p>`}</section>
@@ -142,8 +149,8 @@ function renderExercise(exercise, index, session) {
 
 function renderFuel() {
   const targets = getDailyTargets(); const consumed = macroConsumed(); const meal = value => Math.round(value / 2); const foods = state.today.foods || [];
-  return `${topbar('Fuel', 'EAT WITH INTENTION', 'Fuel')}<section class="card"><div class="card-header"><div><div class="section-label">OpenFoodFacts</div><h2>Add a food</h2></div><span class="muted">Search and select</span></div><label for="food-search">Search a food</label><input id="food-search" type="search" autocomplete="off" role="combobox" aria-controls="food-results" aria-expanded="${Boolean(state.foodResults.length)}" placeholder="Try: Greek yoghurt, oats, chicken" value="${esc(state.foodQuery)}"><div id="food-results" role="listbox" aria-label="Food search results">${renderFoodResults()}</div>${state.selectedFood ? `<div class="card" style="margin:12px 0 0;background:#1d1d1d"><div class="split"><div><strong>${esc(state.selectedFood.name)}</strong><p>Per 100 g · ${state.selectedFood.calories || 0} kcal</p><p style="font-size:11px">Protein ${state.selectedFood.protein || 0}g · Carbs ${state.selectedFood.carbs || 0}g · Fats ${state.selectedFood.fats || 0}g</p></div><button class="primary-button small-button" data-action="add-food">Add food</button></div></div>` : '<p class="food-hint">Search above, then select a result to add it to today.</p>'}</section>
-    <section class="card"><div class="card-header"><div><div class="section-label">Daily balance</div><h2>Remaining</h2></div><button class="secondary-button small-button" data-action="clear-fuel">Clear all fields</button></div>${renderMacro('Calories', consumed.calories, targets.calories, 'kcal')}${renderMacro('Protein', consumed.protein, targets.protein, 'g')}${renderMacro('Carbs', consumed.carbs, targets.carbs, 'g')}${renderMacro('Fats', consumed.fats, targets.fats, 'g')}<details><summary>Food logged today (${foods.length})</summary>${foods.length ? foods.map((food, index) => `<div class="list-row"><span>${esc(food.name)}</span><button class="icon-button" data-action="remove-food" data-index="${index}" aria-label="Remove ${esc(food.name)}">×</button></div>`).join('') : '<p>Nothing logged. Search above and press “Add” to start.</p>'}</details></section>
+  return `${topbar('Fuel', 'EAT WITH INTENTION', 'Fuel')}<section class="card"><div class="card-header"><div><div class="section-label">OpenFoodFacts</div><h2>Add a food</h2></div><span class="muted">Search and select</span></div><label for="food-search">Search a food</label><input id="food-search" type="search" autocomplete="off" role="combobox" aria-controls="food-results" aria-expanded="${Boolean(state.foodResults.length)}" placeholder="Try: Greek yoghurt, oats, chicken" value="${esc(state.foodQuery)}"><div id="food-results" role="listbox" aria-label="Food search results">${renderFoodResults()}</div>${state.selectedFood ? `<div class="card selected-food-card" style="margin:12px 0 0;background:#1d1d1d"><div class="split"><div><strong>${esc(state.selectedFood.name)}</strong><p>Nutrition values are per 100 g.</p></div><button class="primary-button small-button" data-action="add-food">Add food</button></div><div class="quantity-grid"><div class="field"><label for="food-quantity">Quantity</label><input id="food-quantity" type="number" min="0.1" step="0.1" inputmode="decimal" placeholder="e.g. 150" value="${esc(state.foodQuantity)}"></div><div class="field"><label for="food-unit">Unit</label><select id="food-unit"><option value="g" ${state.foodUnit === 'g' ? 'selected' : ''}>grams (g)</option><option value="oz" ${state.foodUnit === 'oz' ? 'selected' : ''}>ounces (oz)</option></select></div></div><p class="scaled-preview" id="scaled-preview">Enter quantity to calculate calories and macros.</p></div>` : '<p class="food-hint">Search above, then select a result. Enter quantity before pressing “Add food”.</p>'}</section>
+     <section class="card"><div class="card-header"><div><div class="section-label">Daily balance</div><h2>Remaining</h2></div><button class="secondary-button small-button" data-action="clear-fuel">Clear all fields</button></div>${renderMacro('Calories', consumed.calories, targets.calories, 'kcal')}${renderMacro('Protein', consumed.protein, targets.protein, 'g')}${renderMacro('Carbs', consumed.carbs, targets.carbs, 'g')}${renderMacro('Fats', consumed.fats, targets.fats, 'g')}<details><summary>Food logged today (${foods.length})</summary>${foods.length ? foods.map((food, index) => { const scaled = scaledFoodMacros(food); return `<div class="list-row"><span><strong>${esc(food.name)}</strong><small class="muted" style="display:block">${round(number(food.quantity ?? 100), 1)} ${esc(food.unit || 'g')} · ${Math.round(scaled.calories)} kcal</small></span><button class="icon-button" data-action="remove-food" data-index="${index}" aria-label="Remove ${esc(food.name)}">×</button></div>`; }).join('') : '<p>Nothing logged. Search above and press “Add” to start.</p>'}</details></section>
     <section class="card"><div class="card-header"><div><div class="section-label">Fixed meal pacing</div><h2>Two meals, clearly timed</h2></div></div><div class="list-row"><div><strong>12:00 PM · Lunch</strong><p>Half of each daily target</p></div><span class="pill">${meal(targets.calories)} kcal</span></div><div class="list-row"><div><strong>5:00 PM · Dinner</strong><p>Half of each daily target</p></div><span class="pill">${meal(targets.calories)} kcal</span></div><p style="font-size:12px">Protein ${meal(targets.protein)}g · Carbs ${meal(targets.carbs)}g · Fats ${meal(targets.fats)}g per meal.</p></section>
     <section class="card"><div class="card-header"><div><div class="section-label">Hydration</div><h2>${state.today.water || 0} of 8 cups</h2></div></div><p>One cup is approximately 250 ml. Tap a cup to mark it complete.</p><div class="water-grid">${Array.from({ length: 8 }, (_, index) => `<button class="water-cup ${(state.today.water || 0) > index ? 'filled' : ''}" data-action="water" data-index="${index}" aria-label="Cup ${index + 1}">Cup ${index + 1}</button>`).join('')}</div><button class="danger-button" style="margin-top:18px" data-action="clear-fuel">Clear all fields</button></section>`;
 }
@@ -184,6 +191,8 @@ function bindView() {
   $$('[data-field]').forEach(input => input.addEventListener('change', event => saveSessionDraft(event)));
   const foodSearch = $('#food-search'); if (foodSearch) { foodSearch.addEventListener('input', event => { state.foodQuery = event.target.value; state.selectedFood = null; state.foodActiveIndex = -1; searchFoods(event.target.value); }); foodSearch.addEventListener('keydown', handleFoodKeydown); }
   bindFoodResults();
+  const foodQuantity = $('#food-quantity'); if (foodQuantity) foodQuantity.addEventListener('input', event => { state.foodQuantity = event.target.value; updateScaledPreview(); });
+  const foodUnit = $('#food-unit'); if (foodUnit) foodUnit.addEventListener('change', event => { state.foodUnit = event.target.value; updateScaledPreview(); });
   $$('[data-action="add-food"]').forEach(button => button.addEventListener('click', addFood));
   $$('[data-action="remove-food"]').forEach(button => button.addEventListener('click', async () => { state.today.foods.splice(Number(button.dataset.index), 1); await saveToday(); render(); }));
   $$('[data-action="clear-fuel"]').forEach(button => button.addEventListener('click', clearFuel));
@@ -230,7 +239,8 @@ function collectSession() {
   });
   return result;
 }
-function bindFoodResults() { $$('[data-action="select-food"]').forEach(button => button.addEventListener('click', () => { state.selectedFood = state.foodResults[Number(button.dataset.index)]; render(); })); }
+function bindFoodResults() { $$('[data-action="select-food"]').forEach(button => button.addEventListener('click', () => { state.selectedFood = { ...state.foodResults[Number(button.dataset.index)] }; state.foodQuantity = ''; state.foodUnit = 'g'; render(); requestAnimationFrame(() => $('#food-quantity')?.focus()); })); }
+function updateScaledPreview() { const preview = $('#scaled-preview'); if (!preview || !state.selectedFood) return; const quantity = number(state.foodQuantity); if (!quantity || quantity <= 0) { preview.textContent = 'Enter quantity to calculate calories and macros.'; return; } const scaled = scaledFoodMacros({ ...state.selectedFood, quantity, unit: state.foodUnit }); preview.textContent = `${Math.round(scaled.calories)} kcal · Protein ${round(scaled.protein, 1)}g · Carbs ${round(scaled.carbs, 1)}g · Fats ${round(scaled.fats, 1)}g`; }
 function handleFoodKeydown(event) {
   if (!state.foodResults.length) return;
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -241,8 +251,8 @@ function handleFoodKeydown(event) {
     const input = $('#food-search'); if (input) input.focus();
   } else if (event.key === 'Enter' && state.foodActiveIndex >= 0) {
     event.preventDefault();
-    state.selectedFood = state.foodResults[state.foodActiveIndex];
-    render();
+    state.selectedFood = { ...state.foodResults[state.foodActiveIndex] }; state.foodQuantity = ''; state.foodUnit = 'g';
+    render(); requestAnimationFrame(() => $('#food-quantity')?.focus());
   } else if (event.key === 'Escape') {
     state.foodResults = []; state.foodActiveIndex = -1; updateFoodDropdown();
   }
@@ -294,30 +304,41 @@ async function searchFoods(query) {
     }
   }, 450);
 }
-async function addFood() { if (!state.selectedFood) return; state.today.foods = [...(state.today.foods || []), state.selectedFood]; await saveToday(); state.selectedFood = null; state.foodResults = []; render(); notify('Food added'); }
-async function clearFuel() { state.today.foods = []; state.today.water = 0; state.foodQuery = ''; state.foodResults = []; state.foodActiveIndex = -1; state.selectedFood = null; await saveToday(); render(); notify('Fuel fields cleared'); }
+async function addFood() { if (!state.selectedFood) return; const quantity = number($('#food-quantity')?.value ?? state.foodQuantity); if (!quantity || quantity <= 0 || !UNIT_TO_GRAMS[state.foodUnit]) { notify('Enter a quantity greater than zero'); $('#food-quantity')?.focus(); return; } const entry = { ...state.selectedFood, quantity, unit: state.foodUnit }; state.today.foods = [...(state.today.foods || []), entry]; await saveToday(); state.selectedFood = null; state.foodQuantity = ''; state.foodUnit = 'g'; state.foodResults = []; state.foodActiveIndex = -1; render(); notify('Food added'); requestAnimationFrame(() => $('#food-search')?.focus()); }
+async function clearFuel() { state.today.foods = []; state.today.water = 0; state.foodQuery = ''; state.foodQuantity = ''; state.foodUnit = 'g'; state.foodResults = []; state.foodActiveIndex = -1; state.selectedFood = null; state.foodRequestId += 1; await saveToday(); render(); notify('Fuel fields cleared'); }
 async function logWeight() { const field = $('#weight-log'); const weight = number(field?.value); if (!weight) { notify('Enter a weight first'); return; } await idbPut('weightLogs', { id: todayKey(), date: todayKey(), weight }); state.weights = await idbAll('weightLogs'); render(); notify('Morning weight saved'); }
 async function logActivity(event) { event.preventDefault(); const type = $('#activity-type').value; const duration = number($('#activity-duration').value); const weight = number(state.profile?.weight); if (!type || !duration || !weight) { notify('Complete activity and profile details first'); return; } const mets = { Walking: 3.5, Running: 9.8, Swimming: 7.0 }; const calories = (mets[type] * 3.5 * weight / 200) * duration; await idbPut('activityLogs', { id: `${todayKey()}-${Date.now()}`, date: todayKey(), type, duration, calories, met: mets[type] }); state.activities = await idbAll('activityLogs'); render(); notify('Activity saved'); }
 
+async function postNotification(payload) { if (!notificationsGranted() || !('serviceWorker' in navigator)) return; try { const registration = await navigator.serviceWorker.ready; const target = registration.active || registration.waiting || registration.installing; if (target) target.postMessage(payload); else await registration.showNotification(payload.title, { body: payload.body, icon: './icon.svg', tag: payload.tag }); } catch (_) {} }
 async function requestNotifications() {
   if (!('Notification' in window)) { notify('Notifications are not supported here'); return; }
-  try { const permission = await Notification.requestPermission(); if (permission === 'granted') { scheduleNotifications(); notify('Reminders enabled'); } else notify('Reminders remain off'); } catch (_) { notify('Could not enable reminders'); }
+  try { const permission = await Notification.requestPermission(); if (permission === 'granted') { await navigator.serviceWorker?.ready; scheduleNotifications(); render(); notify('Reminders and daily quotes enabled'); } else notify('Reminders remain off'); } catch (_) { notify('Could not enable reminders'); }
 }
 async function registerPWA() {
   if ('serviceWorker' in navigator) { try { const registration = await navigator.serviceWorker.register('./sw.js'); window.dShiftRegistration = registration; } catch (_) {} }
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (_) {} }
-  if (Notification.permission === 'granted') scheduleNotifications();
+  if (notificationsGranted()) scheduleNotifications();
 }
 const sentNotifications = new Set();
+async function maybeSendDailyQuote() {
+  if (!notificationsGranted() || state.quoteInFlight) return;
+  const localDate = todayKey(); const now = new Date();
+  if (state.settings.lastQuoteDate === localDate || now.getHours() < 8) return;
+  state.quoteInFlight = true;
+  const quote = getDailyQuote(localDate);
+  await postNotification({ type: 'notify', title: 'D-Shift daily boost', body: `${quote.text} — ${quote.author}`, tag: `daily-quote-${localDate}`, data: { type: 'daily-quote', localDate, quoteId: quote.id, url: './' } });
+  state.settings.lastQuoteDate = localDate; await idbPut('settings', { id: 'app', ...state.settings }); state.quoteInFlight = false;
+}
 function scheduleNotifications() {
-  const check = () => { const now = new Date(); const key = `${todayKey()}-${now.getHours()}:${now.getMinutes()}`; let body = ''; if (now.getHours() === 12 && now.getMinutes() === 0) body = 'Lunch is ready. Hit your first macro target.'; if (now.getHours() === 17 && now.getMinutes() === 0) body = 'Dinner is ready. Close out your fixed meal plan.'; if (now.getMinutes() === 0 && now.getHours() >= 8 && now.getHours() <= 20 && now.getHours() % 2 === 0) body = 'Hydration check. Log a cup of water now.'; if (body && !sentNotifications.has(key)) { sentNotifications.add(key); const message = { type: 'notify', title: 'D-Shift Workouts', body, tag: key }; if (window.dShiftRegistration?.active) window.dShiftRegistration.active.postMessage(message); } }; check(); setInterval(check, 30000); }
+  if (state.notificationInterval) clearInterval(state.notificationInterval);
+  const check = async () => { const now = new Date(); const key = `${todayKey()}-${now.getHours()}:${now.getMinutes()}`; let body = ''; if (now.getHours() === 12 && now.getMinutes() === 0) body = 'Lunch is ready. Hit your first macro target.'; if (now.getHours() === 17 && now.getMinutes() === 0) body = 'Dinner is ready. Close out your fixed meal plan.'; if (now.getMinutes() === 0 && now.getHours() >= 8 && now.getHours() <= 20 && now.getHours() % 2 === 0) body = 'Hydration check. Log a cup of water now.'; if (body && !sentNotifications.has(key)) { sentNotifications.add(key); postNotification({ type: 'notify', title: 'D-Shift Workouts', body, tag: key }); } await maybeSendDailyQuote(); };
+  check(); state.notificationInterval = setInterval(check, 30000);
+}
 
 async function init() {
   try {
     db = await openDB();
     state.profile = (await idbGet('profile', 'main')) || null;
-    state.settings = (await idbGet('settings', 'app')) || { id: 'app', shifts: {}, rotaAnchor: todayKey() };
+    state.settings = (await idbGet('settings', 'app')) || { id: 'app', shifts: {}, rotaAnchor: todayKey() }; await idbPut('settings', state.settings);
     state.today = (await idbGet('dailyLogs', todayKey())) || { id: todayKey(), foods: [], water: 0 };
     state.weights = await idbAll('weightLogs'); state.activities = await idbAll('activityLogs'); state.sessions = await idbAll('sessionLogs');
     render(); registerPWA();
