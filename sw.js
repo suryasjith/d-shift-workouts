@@ -1,4 +1,4 @@
-const CACHE = 'd-shift-v1';
+const CACHE = 'd-shift-v2';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', event => {
