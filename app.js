@@ -38,6 +38,15 @@ const state = {
   rotaOpen: false,
   restTimer: 0, restInterval: null
 };
+const FOOD_FALLBACKS = [
+  { name: 'Chicken breast', calories: 165, protein: 31, carbs: 0, fats: 3.6 },
+  { name: 'Greek yoghurt', calories: 97, protein: 9, carbs: 4, fats: 5 },
+  { name: 'Oats', calories: 389, protein: 17, carbs: 66, fats: 7 },
+  { name: 'White rice, cooked', calories: 130, protein: 2.7, carbs: 28, fats: .3 },
+  { name: 'Banana', calories: 89, protein: 1.1, carbs: 23, fats: .3 },
+  { name: 'Egg', calories: 143, protein: 13, carbs: 1.1, fats: 9.5 },
+  { name: 'Salmon', calories: 208, protein: 20, carbs: 0, fats: 13 }
+];
 
 const getDailyTargets = () => {
   const weight = number(state.profile?.weight);
@@ -125,7 +134,8 @@ function renderExercise(exercise, index, session) {
   const name = swapped ? exercise.alternate : exercise.name;
   const savedSets = Array.isArray(saved.sets) ? saved.sets : [];
   const setCount = Math.max(1, savedSets.length || exercise.sets || 1);
-  const sets = Array.from({ length: setCount }, (_, setIndex) => savedSets[setIndex] || {});
+  const legacySet = !savedSets.length && (saved.weight != null || saved.reps != null) ? { weight: saved.weight, reps: saved.reps } : {};
+  const sets = Array.from({ length: setCount }, (_, setIndex) => savedSets[setIndex] || legacySet);
   return `<div class="exercise" data-exercise="${index}"><div class="exercise-title"><strong>${esc(name)}</strong><button class="secondary-button small-button" data-action="swap" data-index="${index}">Equipment taken · Swap</button></div><div class="set-head"><span>Set</span><span>Weight (kg)</span><span>Reps</span></div><div class="set-list">${sets.map((set, setIndex) => `<div class="set-row"><span class="set-number">${setIndex + 1}</span><input data-field="weight" data-set-index="${setIndex}" type="number" step="0.5" min="0" placeholder="kg" value="${set.weight ?? ''}"><input data-field="reps" data-set-index="${setIndex}" type="number" step="1" min="0" placeholder="reps" value="${set.reps ?? ''}"></div>`).join('')}</div><div class="exercise-actions"><span class="muted">${exercise.sets} sets planned</span><button class="secondary-button small-button" data-action="add-set" data-index="${index}">+ Add set</button></div></div>`;
 }
 
@@ -243,10 +253,16 @@ async function searchFoods(query) {
           if (Array.isArray(payload.hits)) { data = payload.hits; break; }
         } catch (_) { /* Try the next official endpoint. */ }
       }
-      if (!data) throw new Error('Food API unavailable');
-      state.foodResults = data.map(product => ({ name: product.product_name || product.product_name_en || product.generic_name || 'Unnamed food', calories: Number(product.nutriments?.['energy-kcal_100g'] || 0), protein: Number(product.nutriments?.proteins_100g || 0), carbs: Number(product.nutriments?.carbohydrates_100g || 0), fats: Number(product.nutriments?.fat_100g || 0) })).filter(food => food.name !== 'Unnamed food');
+      const apiResults = data?.map(product => ({ name: product.product_name || product.product_name_en || product.generic_name || 'Unnamed food', calories: Number(product.nutriments?.['energy-kcal_100g'] || 0), protein: Number(product.nutriments?.proteins_100g || 0), carbs: Number(product.nutriments?.carbohydrates_100g || 0), fats: Number(product.nutriments?.fat_100g || 0) })).filter(food => food.name !== 'Unnamed food') || [];
+      const localResults = FOOD_FALLBACKS.filter(food => food.name.toLowerCase().includes(query.trim().toLowerCase()));
+      state.foodResults = apiResults.length ? apiResults : localResults;
+      if (!state.foodResults.length) throw new Error('Food API unavailable');
       render();
-    } catch (_) { notify('Food search needs an internet connection'); }
+    } catch (_) {
+      state.foodResults = FOOD_FALLBACKS.filter(food => food.name.toLowerCase().includes(query.trim().toLowerCase()));
+      render();
+      if (!state.foodResults.length) notify('No matching food found. Try a broader search.');
+    }
   }, 450);
 }
 async function addFood() { if (!state.selectedFood) return; state.today.foods = [...(state.today.foods || []), state.selectedFood]; await saveToday(); state.selectedFood = null; state.foodResults = []; render(); notify('Food added'); }
