@@ -34,7 +34,8 @@ const idbDelete = (store, id) => new Promise((resolve, reject) => { const reques
 
 const state = {
   tab: 'today', profile: null, settings: { shifts: {}, rotaAnchor: null }, today: {}, weights: [], activities: [], sessions: [],
-  foodResults: [], selectedFood: null, fuelSearchTimer: null, activitySubtab: 'overview', sessionStarted: null,
+  foodResults: [], foodQuery: '', selectedFood: null, fuelSearchTimer: null, activitySubtab: 'overview', sessionStarted: null,
+  rotaOpen: false,
   restTimer: 0, restInterval: null
 };
 
@@ -107,7 +108,7 @@ function renderWorkout() {
   const session = state.sessions.find(item => item.id === todayKey());
   const elapsed = state.sessionStarted ? Math.floor((Date.now() - state.sessionStarted) / 1000) : (session?.duration || 0);
   return `${topbar('Workout', 'TRAIN WITH YOUR ROTATION', 'Workout')}
-    <details class="card"><summary>Rota engine · 4 on / 3 off</summary><p>Tap any future date to override its route. Untouched dates follow your repeating 4-on / 3-off pattern.</p><div class="field" style="margin:14px 0"><label for="rotaAnchor">Pattern starts on</label><input id="rotaAnchor" type="date" value="${state.settings.rotaAnchor || todayKey()}"></div>${renderCalendar()}</details>
+    <details class="card" data-rota-engine ${state.rotaOpen ? 'open' : ''}><summary>Rota engine · 4 on / 3 off</summary><p>Tap any future date to override its route. Untouched dates follow your repeating 4-on / 3-off pattern.</p><div class="field" style="margin:14px 0"><label for="rotaAnchor">Pattern starts on</label><input id="rotaAnchor" type="date" value="${state.settings.rotaAnchor || todayKey()}"></div>${renderCalendar()}</details>
     <section class="card"><div class="card-header"><div><div class="section-label">Today's route · ${getShift(todayKey())} day</div><h2>${workout.title}</h2></div><span class="pill">${workout.duration} min</span></div><p>${getShift(todayKey()) === 'Work' ? '12-hour shift detected. Keep the joints moving, then protect your recovery.' : 'Off-day detected. This is your best window for full training volume.'}</p><div class="button-row"><button class="primary-button" data-action="session-start">${state.sessionStarted ? 'Session running' : 'Start session'}</button><button class="secondary-button" data-action="clear-session">Clear all fields</button></div>${state.sessionStarted ? `<div class="split" style="margin-top:15px"><span class="timer" id="session-timer">${formatDuration(elapsed)}</span><span class="muted">Started ${new Date(state.sessionStarted).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span></div>` : ''}</section>
     <section class="card"><div class="card-header"><div><div class="section-label">Execution</div><h2>Log each set</h2></div><span class="muted">${state.restTimer ? `Rest ${formatDuration(state.restTimer)}` : state.sessionStarted ? 'Timestamping' : 'Start to timestamp'}</span></div>${state.sessionStarted ? `<div class="field" style="margin-bottom:14px"><label for="session-timestamp">Timestamp · session duration</label><input id="session-timestamp" type="text" readonly value="${formatDuration(elapsed)}"></div>` : ''}${workout.exercises.map((exercise, index) => renderExercise(exercise, index, session)).join('')}<button class="primary-button" data-action="finish-session">Save session</button></section>`;
 }
@@ -122,18 +123,21 @@ function renderExercise(exercise, index, session) {
   const saved = { ...(session?.exercises?.[index] || {}), ...(state.sessionDraft?.[index] || {}) };
   const swapped = state.sessionSwap?.[index] ?? saved.swapped;
   const name = swapped ? exercise.alternate : exercise.name;
-  return `<div class="exercise" data-exercise="${index}"><div class="exercise-title"><strong>${esc(name)}</strong><button class="secondary-button small-button" data-action="swap" data-index="${index}">Equipment taken · Swap</button></div><div class="set-grid"><div><label>Weight (kg)</label><input data-field="weight" type="number" step="0.5" min="0" placeholder="kg" value="${saved.weight ?? ''}"></div><div><label>Reps</label><input data-field="reps" type="number" step="1" min="0" placeholder="reps" value="${saved.reps ?? ''}"></div><div><label>Sets</label><input data-field="sets" type="number" step="1" min="0" placeholder="sets" value="${saved.sets ?? ''}"></div></div></div>`;
+  const savedSets = Array.isArray(saved.sets) ? saved.sets : [];
+  const setCount = Math.max(1, savedSets.length || exercise.sets || 1);
+  const sets = Array.from({ length: setCount }, (_, setIndex) => savedSets[setIndex] || {});
+  return `<div class="exercise" data-exercise="${index}"><div class="exercise-title"><strong>${esc(name)}</strong><button class="secondary-button small-button" data-action="swap" data-index="${index}">Equipment taken · Swap</button></div><div class="set-head"><span>Set</span><span>Weight (kg)</span><span>Reps</span></div><div class="set-list">${sets.map((set, setIndex) => `<div class="set-row"><span class="set-number">${setIndex + 1}</span><input data-field="weight" data-set-index="${setIndex}" type="number" step="0.5" min="0" placeholder="kg" value="${set.weight ?? ''}"><input data-field="reps" data-set-index="${setIndex}" type="number" step="1" min="0" placeholder="reps" value="${set.reps ?? ''}"></div>`).join('')}</div><div class="exercise-actions"><span class="muted">${exercise.sets} sets planned</span><button class="secondary-button small-button" data-action="add-set" data-index="${index}">+ Add set</button></div></div>`;
 }
 
 function renderFuel() {
   const targets = getDailyTargets(); const consumed = macroConsumed(); const meal = value => Math.round(value / 2); const foods = state.today.foods || [];
-  return `${topbar('Fuel', 'EAT WITH INTENTION', 'Fuel')}<section class="card"><div class="card-header"><div><div class="section-label">OpenFoodFacts</div><h2>Add a food</h2></div><span class="muted">Online lookup</span></div><label for="food-search">Search a barcode database</label><input id="food-search" type="search" autocomplete="off" placeholder="Try: Greek yoghurt, oats, chicken"><div id="food-results">${renderFoodResults()}</div>${state.selectedFood ? `<div class="card" style="margin:12px 0 0;background:#1d1d1d"><div class="split"><div><strong>${esc(state.selectedFood.name)}</strong><p>Per 100 g · ${state.selectedFood.calories || 0} kcal</p><p style="font-size:11px">Protein ${state.selectedFood.protein || 0}g · Carbs ${state.selectedFood.carbs || 0}g · Fats ${state.selectedFood.fats || 0}g</p></div><button class="primary-button small-button" data-action="add-food">Add</button></div></div>` : ''}</section>
+  return `${topbar('Fuel', 'EAT WITH INTENTION', 'Fuel')}<section class="card"><div class="card-header"><div><div class="section-label">OpenFoodFacts</div><h2>Add a food</h2></div><span class="muted">Search and select</span></div><label for="food-search">Search a food</label><input id="food-search" type="search" autocomplete="off" role="combobox" aria-controls="food-results" aria-expanded="${Boolean(state.foodResults.length)}" placeholder="Try: Greek yoghurt, oats, chicken" value="${esc(state.foodQuery)}"><div id="food-results" role="listbox" aria-label="Food search results">${renderFoodResults()}</div>${state.selectedFood ? `<div class="card" style="margin:12px 0 0;background:#1d1d1d"><div class="split"><div><strong>${esc(state.selectedFood.name)}</strong><p>Per 100 g · ${state.selectedFood.calories || 0} kcal</p><p style="font-size:11px">Protein ${state.selectedFood.protein || 0}g · Carbs ${state.selectedFood.carbs || 0}g · Fats ${state.selectedFood.fats || 0}g</p></div><button class="primary-button small-button" data-action="add-food">Add food</button></div></div>` : '<p class="food-hint">Search above, then select a result to add it to today.</p>'}</section>
     <section class="card"><div class="card-header"><div><div class="section-label">Daily balance</div><h2>Remaining</h2></div><button class="secondary-button small-button" data-action="clear-fuel">Clear all fields</button></div>${renderMacro('Calories', consumed.calories, targets.calories, 'kcal')}${renderMacro('Protein', consumed.protein, targets.protein, 'g')}${renderMacro('Carbs', consumed.carbs, targets.carbs, 'g')}${renderMacro('Fats', consumed.fats, targets.fats, 'g')}<details><summary>Food logged today (${foods.length})</summary>${foods.length ? foods.map((food, index) => `<div class="list-row"><span>${esc(food.name)}</span><button class="icon-button" data-action="remove-food" data-index="${index}" aria-label="Remove ${esc(food.name)}">×</button></div>`).join('') : '<p>Nothing logged. Search above and press “Add” to start.</p>'}</details></section>
     <section class="card"><div class="card-header"><div><div class="section-label">Fixed meal pacing</div><h2>Two meals, clearly timed</h2></div></div><div class="list-row"><div><strong>12:00 PM · Lunch</strong><p>Half of each daily target</p></div><span class="pill">${meal(targets.calories)} kcal</span></div><div class="list-row"><div><strong>5:00 PM · Dinner</strong><p>Half of each daily target</p></div><span class="pill">${meal(targets.calories)} kcal</span></div><p style="font-size:12px">Protein ${meal(targets.protein)}g · Carbs ${meal(targets.carbs)}g · Fats ${meal(targets.fats)}g per meal.</p></section>
     <section class="card"><div class="card-header"><div><div class="section-label">Hydration</div><h2>${state.today.water || 0} of 8 cups</h2></div></div><p>One cup is approximately 250 ml. Tap a cup to mark it complete.</p><div class="water-grid">${Array.from({ length: 8 }, (_, index) => `<button class="water-cup ${(state.today.water || 0) > index ? 'filled' : ''}" data-action="water" data-index="${index}" aria-label="Cup ${index + 1}">Cup ${index + 1}</button>`).join('')}</div><button class="danger-button" style="margin-top:18px" data-action="clear-fuel">Clear all fields</button></section>`;
 }
 function renderMacro(name, value, target, unit) { const percent = target ? Math.min(100, Math.round(value / target * 100)) : 0; return `<div class="macro-row"><span class="macro-name">${name}</span><span class="macro-value">${Math.max(0, target - value)}${unit} left</span><div class="progress"><span style="width:${percent}%"></span></div></div>`; }
-function renderFoodResults() { if (!state.foodResults.length) return ''; return `<div class="card" style="padding:5px 12px;margin:10px 0 0">${state.foodResults.slice(0, 5).map((food, index) => `<button class="list-row" style="width:100%;background:transparent;border:0;text-align:left;cursor:pointer" data-action="select-food" data-index="${index}"><span>${esc(food.name)}</span><span class="muted">${food.calories || 0} kcal</span></button>`).join('')}</div>`; }
+function renderFoodResults() { if (!state.foodResults.length) return ''; return `<div class="food-dropdown">${state.foodResults.slice(0, 5).map((food, index) => `<button class="food-option" role="option" data-action="select-food" data-index="${index}"><span>${esc(food.name)}</span><span class="muted">${food.calories || 0} kcal</span></button>`).join('')}</div>`; }
 
 function renderProgress() {
   return `${topbar('Progress', 'SEE THE SIGNAL', 'Progress')}<div class="tabs"><button class="subtab ${state.activitySubtab === 'overview' ? 'active' : ''}" data-action="progress-subtab" data-subtab="overview">Overview</button><button class="subtab ${state.activitySubtab === 'activity' ? 'active' : ''}" data-action="progress-subtab" data-subtab="activity">Activity</button></div>${state.activitySubtab === 'overview' ? renderProgressOverview() : renderActivity()}`;
@@ -164,8 +168,9 @@ function bindView() {
   $$('[data-action="finish-session"]').forEach(button => button.addEventListener('click', finishSession));
   $$('[data-action="clear-session"]').forEach(button => button.addEventListener('click', clearSession));
   $$('[data-action="swap"]').forEach(button => button.addEventListener('click', () => { const exercise = $(`[data-exercise="${button.dataset.index}"]`); const input = exercise.querySelector('[data-field="weight"]'); state.sessionDraft = collectSession(); state.sessionSwap = state.sessionSwap || {}; state.sessionSwap[button.dataset.index] = !state.sessionSwap[button.dataset.index]; render(); const next = $(`[data-exercise="${button.dataset.index}"] [data-field="weight"]`); if (next && input) next.focus(); }));
+  $$('[data-action="add-set"]').forEach(button => button.addEventListener('click', () => { state.sessionDraft = collectSession(); const index = Number(button.dataset.index); const current = state.sessionDraft[index] || { sets: [] }; current.sets = [...(Array.isArray(current.sets) ? current.sets : []), {}]; state.sessionDraft[index] = current; render(); notify('Set added'); }));
   $$('[data-field]').forEach(input => input.addEventListener('change', event => saveSessionDraft(event)));
-  const foodSearch = $('#food-search'); if (foodSearch) foodSearch.addEventListener('input', event => searchFoods(event.target.value));
+  const foodSearch = $('#food-search'); if (foodSearch) foodSearch.addEventListener('input', event => { state.foodQuery = event.target.value; searchFoods(event.target.value); });
   $$('[data-action="select-food"]').forEach(button => button.addEventListener('click', () => { state.selectedFood = state.foodResults[Number(button.dataset.index)]; render(); }));
   $$('[data-action="add-food"]').forEach(button => button.addEventListener('click', addFood));
   $$('[data-action="remove-food"]').forEach(button => button.addEventListener('click', async () => { state.today.foods.splice(Number(button.dataset.index), 1); await saveToday(); render(); }));
@@ -173,6 +178,7 @@ function bindView() {
   $$('[data-action="progress-subtab"]').forEach(button => button.addEventListener('click', () => { state.activitySubtab = button.dataset.subtab; render(); }));
   $$('[data-action="log-weight"]').forEach(button => button.addEventListener('click', logWeight));
   const activityForm = $('#activity-form'); if (activityForm) activityForm.addEventListener('submit', logActivity);
+  const rotaEngine = $('[data-rota-engine]'); if (rotaEngine) rotaEngine.addEventListener('toggle', () => { state.rotaOpen = rotaEngine.open; });
   if (state.sessionStarted) { clearInterval(state.sessionInterval); state.sessionInterval = setInterval(() => { const timer = $('#session-timer'); if (timer) timer.textContent = formatDuration(Math.floor((Date.now() - state.sessionStarted) / 1000)); }, 1000); }
 }
 
@@ -201,7 +207,16 @@ function openShiftEditor(key) {
   $$('[data-action="choose-shift"]').forEach(button => button.addEventListener('click', async () => { state.settings.shifts[button.dataset.date] = button.dataset.shift; await idbPut('settings', { id: 'app', ...state.settings }); closeModal(); render(); notify(`${button.dataset.shift} day saved`); }));
 }
 function collectSession() {
-  const result = {}; $$('.exercise').forEach((exercise, index) => { result[index] = { ...(state.sessionDraft?.[index] || {}), swapped: Boolean(state.sessionSwap?.[index]), ...Object.fromEntries($$('[data-field]', exercise).map(input => [input.dataset.field, number(input.value)])) }; }); return result;
+  const result = {};
+  $$('.exercise').forEach((exercise, index) => {
+    const sets = [];
+    $$('[data-field]', exercise).forEach(input => {
+      const setIndex = Number(input.dataset.setIndex || 0);
+      sets[setIndex] = { ...(sets[setIndex] || {}), [input.dataset.field]: number(input.value) };
+    });
+    result[index] = { ...(state.sessionDraft?.[index] || {}), swapped: Boolean(state.sessionSwap?.[index]), sets };
+  });
+  return result;
 }
 async function saveSessionDraft(event) { state.sessionDraft = collectSession(); if (event?.target?.dataset.field && !state.restTimer) startRestTimer(); }
 function startRestTimer() { state.restTimer = 60; clearInterval(state.restInterval); state.restInterval = setInterval(() => { state.restTimer -= 1; const label = $('.card:nth-of-type(3) .card-header .muted'); if (label) label.textContent = state.restTimer > 0 ? `Rest ${formatDuration(state.restTimer)}` : 'Rest complete'; if (state.restTimer <= 0) clearInterval(state.restInterval); }, 1000); }
