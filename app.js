@@ -180,8 +180,8 @@ function bindView() {
   $$('[data-action="swap"]').forEach(button => button.addEventListener('click', () => { const exercise = $(`[data-exercise="${button.dataset.index}"]`); const input = exercise.querySelector('[data-field="weight"]'); state.sessionDraft = collectSession(); state.sessionSwap = state.sessionSwap || {}; state.sessionSwap[button.dataset.index] = !state.sessionSwap[button.dataset.index]; render(); const next = $(`[data-exercise="${button.dataset.index}"] [data-field="weight"]`); if (next && input) next.focus(); }));
   $$('[data-action="add-set"]').forEach(button => button.addEventListener('click', () => { state.sessionDraft = collectSession(); const index = Number(button.dataset.index); const current = state.sessionDraft[index] || { sets: [] }; current.sets = [...(Array.isArray(current.sets) ? current.sets : []), {}]; state.sessionDraft[index] = current; render(); notify('Set added'); }));
   $$('[data-field]').forEach(input => input.addEventListener('change', event => saveSessionDraft(event)));
-  const foodSearch = $('#food-search'); if (foodSearch) foodSearch.addEventListener('input', event => { state.foodQuery = event.target.value; searchFoods(event.target.value); });
-  $$('[data-action="select-food"]').forEach(button => button.addEventListener('click', () => { state.selectedFood = state.foodResults[Number(button.dataset.index)]; render(); }));
+  const foodSearch = $('#food-search'); if (foodSearch) foodSearch.addEventListener('input', event => { state.foodQuery = event.target.value; state.selectedFood = null; searchFoods(event.target.value); });
+  bindFoodResults();
   $$('[data-action="add-food"]').forEach(button => button.addEventListener('click', addFood));
   $$('[data-action="remove-food"]').forEach(button => button.addEventListener('click', async () => { state.today.foods.splice(Number(button.dataset.index), 1); await saveToday(); render(); }));
   $$('[data-action="clear-fuel"]').forEach(button => button.addEventListener('click', clearFuel));
@@ -228,6 +228,15 @@ function collectSession() {
   });
   return result;
 }
+function bindFoodResults() { $$('[data-action="select-food"]').forEach(button => button.addEventListener('click', () => { state.selectedFood = state.foodResults[Number(button.dataset.index)]; render(); })); }
+function updateFoodDropdown() {
+  const results = $('#food-results');
+  if (!results) return;
+  results.innerHTML = renderFoodResults();
+  const search = $('#food-search');
+  if (search) search.setAttribute('aria-expanded', String(Boolean(state.foodResults.length)));
+  bindFoodResults();
+}
 async function saveSessionDraft(event) { state.sessionDraft = collectSession(); if (event?.target?.dataset.field && !state.restTimer) startRestTimer(); }
 function startRestTimer() { state.restTimer = 60; clearInterval(state.restInterval); state.restInterval = setInterval(() => { state.restTimer -= 1; const label = $('.card:nth-of-type(3) .card-header .muted'); if (label) label.textContent = state.restTimer > 0 ? `Rest ${formatDuration(state.restTimer)}` : 'Rest complete'; if (state.restTimer <= 0) clearInterval(state.restInterval); }, 1000); }
 function startSession() { if (!state.sessionStarted) state.sessionStarted = Date.now(); render(); notify('Session timer started'); }
@@ -235,7 +244,7 @@ async function finishSession() { const exercises = collectSession(); const durat
 function clearSession() { state.sessionDraft = {}; state.sessionStarted = null; state.sessionSwap = {}; state.restTimer = 0; clearInterval(state.restInterval); render(); notify('Workout fields cleared'); }
 
 async function searchFoods(query) {
-  clearTimeout(state.fuelSearchTimer); if (query.trim().length < 3) { state.foodResults = []; render(); return; }
+  clearTimeout(state.fuelSearchTimer); if (query.trim().length < 3) { state.foodResults = []; updateFoodDropdown(); return; }
   state.fuelSearchTimer = setTimeout(async () => {
     const encodedQuery = encodeURIComponent(query);
     const endpoints = [
@@ -257,10 +266,10 @@ async function searchFoods(query) {
       const localResults = FOOD_FALLBACKS.filter(food => food.name.toLowerCase().includes(query.trim().toLowerCase()));
       state.foodResults = apiResults.length ? apiResults : localResults;
       if (!state.foodResults.length) throw new Error('Food API unavailable');
-      render();
+      updateFoodDropdown();
     } catch (_) {
       state.foodResults = FOOD_FALLBACKS.filter(food => food.name.toLowerCase().includes(query.trim().toLowerCase()));
-      render();
+      updateFoodDropdown();
       if (!state.foodResults.length) notify('No matching food found. Try a broader search.');
     }
   }, 450);
