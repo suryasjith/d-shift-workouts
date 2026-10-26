@@ -20,7 +20,11 @@ button { color: inherit; }
 button, .clickable { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .app-shell { width: 100%; max-width: 720px; margin: 0 auto; min-height: 100dvh; padding: 28px 20px calc(var(--tab-height) + 30px); }
-.topbar { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 30px; }
+.topbar { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 26px; }
+.topbar-main { min-width: 0; }
+.brand-line { display: flex; align-items: center; gap: 8px; margin-bottom: 22px; }
+.brand-mark { display: grid; place-items: center; width: 25px; height: 25px; border: 1px solid #777; border-radius: 7px; font-size: 13px; font-weight: 900; }
+.brand-name { color: #aaa; font-size: 11px; font-weight: 800; letter-spacing: .2em; }
 .eyebrow { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; margin: 0 0 9px; }
 h1 { font-size: clamp(30px, 8vw, 44px); letter-spacing: -.05em; line-height: 1; margin: 0; }
 h2 { font-size: 23px; letter-spacing: -.04em; margin: 0; }
@@ -29,7 +33,7 @@ p { color: var(--muted); line-height: 1.45; margin: 8px 0; }
 .icon-button { background: transparent; border: 1px solid var(--line); border-radius: 50%; width: 36px; height: 36px; display: grid; place-items: center; font-weight: 800; cursor: pointer; }
 .tab-help { margin-top: 2px; }
 .date-line { color: var(--muted); font-size: 13px; margin-top: 10px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin: 12px 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 19px; margin: 12px 0; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
 .card-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 15px; }
 .section-label { color: var(--muted); text-transform: uppercase; letter-spacing: .12em; font-size: 10px; font-weight: 700; }
 .primary-button, .secondary-button, .danger-button { width: 100%; border: 0; border-radius: 12px; padding: 15px 17px; min-height: 52px; font-weight: 750; cursor: pointer; transition: transform .15s ease, background .15s ease; }
@@ -112,6 +116,16 @@ summary { cursor: pointer; color: #ddd; font-weight: 700; list-style-position: i
 .exercise-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px; }
 .timer { font-variant-numeric: tabular-nums; font-size: 32px; font-weight: 800; letter-spacing: -.05em; }
 .pill { border: 1px solid #444; border-radius: 99px; padding: 7px 10px; color: #ccc; font-size: 11px; }
+.readiness-card { background: #0d0d0d; }
+.command-card { background: #f0f0f0; color: #000; border-color: #f0f0f0; }
+.command-card p { color: #555; }
+.command-card .section-label { color: #666; }
+.command-card .pill { color: #333; border-color: #aaa; }
+.command-kicker, .command-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.command-title { margin-top: 18px; }
+.command-title h2 { color: #000; font-size: 28px; }
+.command-arrow { font-size: 30px; line-height: 1; }
+.command-card .primary-button { background: #000; color: #fff; }
 .warning { border-left: 3px solid #aaa; padding: 12px 14px; background: #1a1a1a; color: #ccc; font-size: 12px; line-height: 1.5; }
 .chart { height: 170px; position: relative; border-left: 1px solid #555; border-bottom: 1px solid #555; margin: 18px 6px 5px 29px; }
 .chart svg { width: 100%; height: 100%; overflow: visible; }

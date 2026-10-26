@@ -70,7 +70,7 @@ const saveToday = async () => { state.today.id = todayKey(); await idbPut('daily
 
 function icon(name) { return ({ today: '⌂', workout: '◒', fuel: '◉', progress: '↗' }[name] || '•'); }
 function nav() { return `<nav class="bottom-nav" aria-label="Primary navigation">${[['today', 'Today'], ['workout', 'Workout'], ['fuel', 'Fuel'], ['progress', 'Progress']].map(([id, label]) => `<button class="nav-item ${state.tab === id ? 'active' : ''}" data-action="tab" data-tab="${id}"><span class="nav-icon">${icon(id)}</span>${label}</button>`).join('')}</nav>`; }
-function topbar(title, eyebrow, help) { return `<header class="topbar"><div><p class="eyebrow">${eyebrow}</p><h1>${title}</h1>${state.tab === 'today' ? `<div class="date-line">${prettyDate(todayKey())}</div>` : ''}</div><button class="icon-button tab-help" data-action="help" aria-label="About ${title}">i</button></header>`; }
+function topbar(title, eyebrow, help) { return `<header class="topbar"><div class="topbar-main"><div class="brand-line"><span class="brand-mark">D</span><span class="brand-name">D-SHIFT</span></div><p class="eyebrow">${eyebrow}</p><h1>${title}</h1>${state.tab === 'today' ? `<div class="date-line">${prettyDate(todayKey())}</div>` : ''}</div><button class="icon-button tab-help" data-action="help" aria-label="About ${title}">i</button></header>`; }
 
 function render() {
   const views = { today: renderToday, workout: renderWorkout, fuel: renderFuel, progress: renderProgress };
@@ -88,8 +88,8 @@ function renderToday() {
   const water = state.today.water || 0;
   return `${topbar('Today', 'D-SHIFT WORKOUTS', 'Today')}
     ${!profile ? `<section class="card empty-state"><div class="setup-mark">D</div><strong>Build your shift-ready plan</strong><p>Press the button below to enter your profile. Your targets, workout routing and timeline will be calculated from it.</p><button class="primary-button" data-action="profile">Set up my profile</button></section>` : ''}${remindersNeedAction() ? `<section class="card"><div class="split"><div><div class="section-label">Stay on time</div><strong>Meal and hydration reminders</strong><p style="font-size:12px">Allow notifications for 12 PM lunch, 5 PM dinner and interval water checks.</p></div><button class="secondary-button small-button" data-action="notifications">Enable</button></div></section>` : ''}
-    <section class="card"><div class="card-header"><div><div class="section-label">Readiness</div><h2>How do you feel?</h2></div><span class="pill">${fatigue ? `RPE ${fatigue}/10` : 'Not logged'}</span></div><p>Tell D-Shift how hard today feels. A high score automatically trims volume.</p><div class="rpe-wrap"><input id="fatigue" type="range" min="1" max="10" step="1" aria-label="Fatigue, 1 to 10" ${fatigue ? `value="${fatigue}"` : ''}><div class="range-labels"><span>Fresh · 1</span><span>Wrecked · 10</span></div></div></section>
-    <section class="card"><div class="card-header"><div><div class="section-label">Right now</div><h2>${profile ? workout.title : 'Your next workout'}</h2></div><span class="pill">${getShift(todayKey())} day</span></div>${profile ? `<div class="metric-grid"><div class="metric"><strong>${esc(workout.muscle)}</strong><span>Focus</span></div><div class="metric"><strong>${workout.duration} min</strong><span>Duration</span></div><div class="metric"><strong>${fatigue >= 8 ? 'Reduced' : 'Full'}</strong><span>Volume</span></div></div><button class="secondary-button" style="margin-top:14px" data-action="tab" data-tab="workout">Open workout</button>` : `<div class="empty-state"><strong>Profile needed</strong><p>Press “Set up my profile” above first. Your rota will choose the right session.</p></div>`}</section>
+    <section class="card readiness-card"><div class="card-header"><div><div class="section-label">Readiness check</div><h2>How do you feel?</h2></div><span class="pill">${fatigue ? `RPE ${fatigue}/10` : 'Not logged'}</span></div><p>One quick score tells D-Shift how much training your shift can support today.</p><div class="rpe-wrap"><input id="fatigue" type="range" min="1" max="10" step="1" aria-label="Fatigue, 1 to 10" ${fatigue ? `value="${fatigue}"` : ''}><div class="range-labels"><span>Fresh · 1</span><span>Wrecked · 10</span></div></div></section>
+    <section class="card command-card"><div class="command-kicker"><span class="section-label">Your next move</span><span class="pill">${getShift(todayKey())} day</span></div><div class="command-title"><h2>${profile ? workout.title : 'Your shift-ready plan'}</h2><span class="command-arrow">→</span></div>${profile ? `<p>${esc(workout.muscle)} · ${workout.duration} minutes${fatigue >= 8 ? ' · volume reduced for recovery' : ''}</p><button class="primary-button" style="margin-top:14px" data-action="tab" data-tab="workout">Open workout</button>` : `<div class="empty-state"><strong>Start with your profile</strong><p>Press “Set up my profile” above and D-Shift will route your training around work.</p></div>`}</section>
     ${profile ? renderProfileSummary() : ''}<section class="card"><div class="card-header"><div><div class="section-label">Daily fuel</div><h2>Remaining macros</h2></div><button class="icon-button" data-action="tab" data-tab="fuel" aria-label="Open fuel">→</button></div>${profile ? `<div class="metric-grid"><div class="metric"><strong>${Math.max(0, targets.calories - consumed.calories)}</strong><span>kcal</span></div><div class="metric"><strong>${Math.max(0, targets.protein - consumed.protein)}g</strong><span>protein</span></div><div class="metric"><strong>${Math.max(0, targets.carbs - consumed.carbs)}g</strong><span>carbs</span></div></div>` : `<p>Set up your profile to calculate your macro targets.</p>`}</section>
     <section class="card"><div class="card-header"><div><div class="section-label">Activity</div><h2>Keep moving</h2></div></div><div class="field"><label for="steps">Steps today</label><input id="steps" type="number" min="0" inputmode="numeric" placeholder="e.g. 8000" value="${state.today.steps ?? ''}"></div><div class="list-row" style="margin-top:12px"><span>Water remaining</span><strong>${profile ? `${Math.max(0, waterTarget - water)} / ${waterTarget} cups` : 'Set up profile'}</strong></div><div class="water-grid" style="margin-top:14px">${Array.from({ length: waterTarget }, (_, index) => `<button class="water-cup ${index < water ? 'filled' : ''}" data-action="water" data-index="${index}" aria-label="${index < water ? 'Remove' : 'Add'} cup ${index + 1}">Cup ${index + 1}</button>`).join('')}</div></section>`;
 }
@@ -229,8 +229,8 @@ async function searchFoods(query) {
   state.fuelSearchTimer = setTimeout(async () => {
     const encodedQuery = encodeURIComponent(query);
     const endpoints = [
-      `https://world.openfoodfacts.net/api/v2/search?search_terms=${encodedQuery}&fields=product_name,generic_name,nutriments&page_size=5`,
-      `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodedQuery}&search_simple=1&action=process&json=1&page_size=5`
+      `https://world.openfoodfacts.net/cgi/search.pl?search_terms=${encodedQuery}&search_simple=1&action=process&json=1&page_size=8`,
+      `https://search.openfoodfacts.org/search?q=${encodedQuery}&size=8`
     ];
     try {
       let data = null;
@@ -239,11 +239,12 @@ async function searchFoods(query) {
           const response = await fetch(endpoint);
           if (!response.ok) continue;
           const payload = await response.json();
-          if (Array.isArray(payload.products)) { data = payload; break; }
+          if (Array.isArray(payload.products)) { data = payload.products; break; }
+          if (Array.isArray(payload.hits)) { data = payload.hits; break; }
         } catch (_) { /* Try the next official endpoint. */ }
       }
       if (!data) throw new Error('Food API unavailable');
-      state.foodResults = data.products.map(product => ({ name: product.product_name || product.generic_name || 'Unnamed food', calories: Number(product.nutriments?.['energy-kcal_100g'] || 0), protein: Number(product.nutriments?.proteins_100g || 0), carbs: Number(product.nutriments?.carbohydrates_100g || 0), fats: Number(product.nutriments?.fat_100g || 0) })).filter(food => food.name !== 'Unnamed food');
+      state.foodResults = data.map(product => ({ name: product.product_name || product.product_name_en || product.generic_name || 'Unnamed food', calories: Number(product.nutriments?.['energy-kcal_100g'] || 0), protein: Number(product.nutriments?.proteins_100g || 0), carbs: Number(product.nutriments?.carbohydrates_100g || 0), fats: Number(product.nutriments?.fat_100g || 0) })).filter(food => food.name !== 'Unnamed food');
       render();
     } catch (_) { notify('Food search needs an internet connection'); }
   }, 450);
