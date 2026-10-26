@@ -211,7 +211,27 @@ function clearSession() { state.sessionDraft = {}; state.sessionStarted = null; 
 
 async function searchFoods(query) {
   clearTimeout(state.fuelSearchTimer); if (query.trim().length < 3) { state.foodResults = []; render(); return; }
-  state.fuelSearchTimer = setTimeout(async () => { try { const response = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=5`); const data = await response.json(); state.foodResults = (data.products || []).map(product => ({ name: product.product_name || product.generic_name || 'Unnamed food', calories: Number(product.nutriments?.['energy-kcal_100g'] || 0), protein: Number(product.nutriments?.proteins_100g || 0), carbs: Number(product.nutriments?.carbohydrates_100g || 0), fats: Number(product.nutriments?.fat_100g || 0) })).filter(food => food.name !== 'Unnamed food'); render(); } catch (_) { notify('Food search needs an internet connection'); } }, 450);
+  state.fuelSearchTimer = setTimeout(async () => {
+    const encodedQuery = encodeURIComponent(query);
+    const endpoints = [
+      `https://world.openfoodfacts.net/api/v2/search?search_terms=${encodedQuery}&fields=product_name,generic_name,nutriments&page_size=5`,
+      `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodedQuery}&search_simple=1&action=process&json=1&page_size=5`
+    ];
+    try {
+      let data = null;
+      for (const endpoint of endpoints) {
+        try {
+          const response = await fetch(endpoint);
+          if (!response.ok) continue;
+          const payload = await response.json();
+          if (Array.isArray(payload.products)) { data = payload; break; }
+        } catch (_) { /* Try the next official endpoint. */ }
+      }
+      if (!data) throw new Error('Food API unavailable');
+      state.foodResults = data.products.map(product => ({ name: product.product_name || product.generic_name || 'Unnamed food', calories: Number(product.nutriments?.['energy-kcal_100g'] || 0), protein: Number(product.nutriments?.proteins_100g || 0), carbs: Number(product.nutriments?.carbohydrates_100g || 0), fats: Number(product.nutriments?.fat_100g || 0) })).filter(food => food.name !== 'Unnamed food');
+      render();
+    } catch (_) { notify('Food search needs an internet connection'); }
+  }, 450);
 }
 async function addFood() { if (!state.selectedFood) return; state.today.foods = [...(state.today.foods || []), state.selectedFood]; await saveToday(); state.selectedFood = null; state.foodResults = []; render(); notify('Food added'); }
 async function clearFuel() { state.today.foods = []; state.today.water = 0; await saveToday(); render(); notify('Fuel fields cleared'); }
