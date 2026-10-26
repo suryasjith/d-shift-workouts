@@ -1,0 +1,245 @@
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const todayKey = (date = new Date()) => {
+  const d = new Date(date); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 10);
+};
+const dateFromKey = key => new Date(`${key}T12:00:00`);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]));
+const number = value => value === '' || value == null || Number.isNaN(Number(value)) ? null : Number(value);
+const round = (value, places = 0) => value == null ? '—' : Number(value).toFixed(places);
+const prettyDate = (key, options = { weekday: 'long', day: 'numeric', month: 'long' }) => new Intl.DateTimeFormat('en-GB', options).format(dateFromKey(key));
+const keyForOffset = offset => { const date = dateFromKey(todayKey()); date.setDate(date.getDate() + offset); return todayKey(date); };
+const notify = message => { const toast = $('#toast'); if (!toast) return; toast.textContent = message; toast.classList.add('show'); clearTimeout(notify.timer); notify.timer = setTimeout(() => toast.classList.remove('show'), 2400); };
+const remindersNeedAction = () => 'Notification' in window && Notification.permission !== 'granted';
+
+const DB_NAME = 'd-shift-workouts';
+const DB_VERSION = 1;
+let db;
+const openDB = () => new Promise((resolve, reject) => {
+  const request = indexedDB.open(DB_NAME, DB_VERSION);
+  request.onupgradeneeded = () => {
+    const database = request.result;
+    ['profile', 'settings', 'dailyLogs', 'weightLogs', 'activityLogs', 'sessionLogs'].forEach(store => {
+      if (!database.objectStoreNames.contains(store)) database.createObjectStore(store, { keyPath: 'id' });
+    });
+  };
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+const idbGet = (store, id) => new Promise((resolve, reject) => { const request = db.transaction(store).objectStore(store).get(id); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+const idbAll = store => new Promise((resolve, reject) => { const request = db.transaction(store).objectStore(store).getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => reject(request.error); });
+const idbPut = (store, value) => new Promise((resolve, reject) => { const request = db.transaction(store, 'readwrite').objectStore(store).put(value); request.onsuccess = () => resolve(value); request.onerror = () => reject(request.error); });
+const idbDelete = (store, id) => new Promise((resolve, reject) => { const request = db.transaction(store, 'readwrite').objectStore(store).delete(id); request.onsuccess = resolve; request.onerror = () => reject(request.error); });
+
+const state = {
+  tab: 'today', profile: null, settings: { shifts: {}, rotaAnchor: null }, today: {}, weights: [], activities: [], sessions: [],
+  foodResults: [], selectedFood: null, fuelSearchTimer: null, activitySubtab: 'overview', sessionStarted: null,
+  restTimer: 0, restInterval: null
+};
+
+const getDailyTargets = () => {
+  const weight = number(state.profile?.weight);
+  if (!weight) return { calories: 0, protein: 0, carbs: 0, fats: 0 };
+  const calories = Math.round(weight * 30 + (state.profile.goal === 'muscle' ? 250 : state.profile.goal === 'recomp' ? 100 : 0));
+  const protein = Math.round(weight * 1.8);
+  const fats = Math.round(weight * .8);
+  return { calories, protein, carbs: Math.max(0, Math.round((calories - protein * 4 - fats * 9) / 4)), fats };
+};
+const getProfileStats = () => {
+  const weight = number(state.profile?.weight); const height = number(state.profile?.height); const target = number(state.profile?.targetWeight);
+  if (!weight || !height || !target) return null;
+  const heightM = height / 100; const currentBMI = weight / (heightM * heightM); const targetBMI = target / (heightM * heightM); const change = Math.abs(weight - target);
+  return { currentBMI, targetBMI, change, averageWeeks: Math.ceil(change / .5), optimalWeeks: Math.ceil(change / 1) };
+};
+const getShift = key => {
+  if (state.settings.shifts?.[key]) return state.settings.shifts[key];
+  const anchor = dateFromKey(state.settings.rotaAnchor || todayKey());
+  const date = dateFromKey(key);
+  const diff = Math.floor((date - anchor) / 86400000);
+  return ((diff % 7) + 7) % 7 < 4 ? 'Work' : 'Off';
+};
+const getWorkout = (key = todayKey()) => getShift(key) === 'Work'
+  ? { mode: 'shift', muscle: 'Mobility + recovery', duration: 15, title: 'Quick shift reset', exercises: [{ name: 'Hip flexor stretch', alternate: 'Couch stretch', sets: 2 }, { name: 'Band pull-apart', alternate: 'Wall slides', sets: 2 }, { name: 'Dead bug', alternate: 'Bird dog', sets: 2 }] }
+  : { mode: 'off', muscle: 'Full body strength', duration: 52, title: 'Full body strength', exercises: [{ name: 'Goblet squat', alternate: 'Leg press', sets: 3 }, { name: 'Dumbbell bench press', alternate: 'Push-up', sets: 3 }, { name: 'Romanian deadlift', alternate: 'Cable pull-through', sets: 3 }, { name: 'Seated row', alternate: 'Inverted row', sets: 3 }] };
+const adjustedWorkout = () => { const workout = getWorkout(); const fatigue = number(state.today.fatigue); if (fatigue >= 8) return { ...workout, duration: Math.round(workout.duration * .65), title: `${workout.title} · reduced volume`, exercises: workout.exercises.slice(0, Math.max(2, Math.ceil(workout.exercises.length * .65))) }; return workout; };
+const logForToday = () => state.today;
+const macroConsumed = key => (state.today.foods || []).reduce((total, food) => ({ calories: total.calories + (food.calories || 0), protein: total.protein + (food.protein || 0), carbs: total.carbs + (food.carbs || 0), fats: total.fats + (food.fats || 0) }), { calories: 0, protein: 0, carbs: 0, fats: 0 });
+const saveToday = async () => { state.today.id = todayKey(); await idbPut('dailyLogs', state.today); };
+
+function icon(name) { return ({ today: '⌂', workout: '◒', fuel: '◉', progress: '↗' }[name] || '•'); }
+function nav() { return `<nav class="bottom-nav" aria-label="Primary navigation">${[['today', 'Today'], ['workout', 'Workout'], ['fuel', 'Fuel'], ['progress', 'Progress']].map(([id, label]) => `<button class="nav-item ${state.tab === id ? 'active' : ''}" data-action="tab" data-tab="${id}"><span class="nav-icon">${icon(id)}</span>${label}</button>`).join('')}</nav>`; }
+function topbar(title, eyebrow, help) { return `<header class="topbar"><div><p class="eyebrow">${eyebrow}</p><h1>${title}</h1>${state.tab === 'today' ? `<div class="date-line">${prettyDate(todayKey())}</div>` : ''}</div><button class="icon-button tab-help" data-action="help" aria-label="About ${title}">i</button></header>`; }
+
+function render() {
+  const views = { today: renderToday, workout: renderWorkout, fuel: renderFuel, progress: renderProgress };
+  $('#app').innerHTML = `<div class="view">${views[state.tab]()}${nav()}</div>`;
+  bindView();
+}
+
+function renderToday() {
+  const profile = state.profile;
+  const workout = adjustedWorkout();
+  const targets = getDailyTargets();
+  const consumed = macroConsumed();
+  const fatigue = number(state.today.fatigue);
+  const waterTarget = profile ? 8 : 0;
+  const water = state.today.water || 0;
+  return `${topbar('Today', 'D-SHIFT WORKOUTS', 'Today')}
+    ${!profile ? `<section class="card empty-state"><div class="setup-mark">D</div><strong>Build your shift-ready plan</strong><p>Press the button below to enter your profile. Your targets, workout routing and timeline will be calculated from it.</p><button class="primary-button" data-action="profile">Set up my profile</button></section>` : ''}${remindersNeedAction() ? `<section class="card"><div class="split"><div><div class="section-label">Stay on time</div><strong>Meal and hydration reminders</strong><p style="font-size:12px">Allow notifications for 12 PM lunch, 5 PM dinner and interval water checks.</p></div><button class="secondary-button small-button" data-action="notifications">Enable</button></div></section>` : ''}
+    <section class="card"><div class="card-header"><div><div class="section-label">Readiness</div><h2>How do you feel?</h2></div><span class="pill">${fatigue ? `RPE ${fatigue}/10` : 'Not logged'}</span></div><p>Tell D-Shift how hard today feels. A high score automatically trims volume.</p><div class="rpe-wrap"><input id="fatigue" type="range" min="1" max="10" step="1" aria-label="Fatigue, 1 to 10" ${fatigue ? `value="${fatigue}"` : ''}><div class="range-labels"><span>Fresh · 1</span><span>Wrecked · 10</span></div></div></section>
+    <section class="card"><div class="card-header"><div><div class="section-label">Right now</div><h2>${profile ? workout.title : 'Your next workout'}</h2></div><span class="pill">${getShift(todayKey())} day</span></div>${profile ? `<div class="metric-grid"><div class="metric"><strong>${esc(workout.muscle)}</strong><span>Focus</span></div><div class="metric"><strong>${workout.duration} min</strong><span>Duration</span></div><div class="metric"><strong>${fatigue >= 8 ? 'Reduced' : 'Full'}</strong><span>Volume</span></div></div><button class="secondary-button" style="margin-top:14px" data-action="tab" data-tab="workout">Open workout</button>` : `<div class="empty-state"><strong>Profile needed</strong><p>Press “Set up my profile” above first. Your rota will choose the right session.</p></div>`}</section>
+    ${profile ? renderProfileSummary() : ''}<section class="card"><div class="card-header"><div><div class="section-label">Daily fuel</div><h2>Remaining macros</h2></div><button class="icon-button" data-action="tab" data-tab="fuel" aria-label="Open fuel">→</button></div>${profile ? `<div class="metric-grid"><div class="metric"><strong>${Math.max(0, targets.calories - consumed.calories)}</strong><span>kcal</span></div><div class="metric"><strong>${Math.max(0, targets.protein - consumed.protein)}g</strong><span>protein</span></div><div class="metric"><strong>${Math.max(0, targets.carbs - consumed.carbs)}g</strong><span>carbs</span></div></div>` : `<p>Set up your profile to calculate your macro targets.</p>`}</section>
+    <section class="card"><div class="card-header"><div><div class="section-label">Activity</div><h2>Keep moving</h2></div></div><div class="field"><label for="steps">Steps today</label><input id="steps" type="number" min="0" inputmode="numeric" placeholder="e.g. 8000" value="${state.today.steps ?? ''}"></div><div class="list-row" style="margin-top:12px"><span>Water remaining</span><strong>${profile ? `${Math.max(0, waterTarget - water)} / ${waterTarget} cups` : 'Set up profile'}</strong></div><div class="water-grid" style="margin-top:14px">${Array.from({ length: waterTarget }, (_, index) => `<button class="water-cup ${index < water ? 'filled' : ''}" data-action="water" data-index="${index}" aria-label="${index < water ? 'Remove' : 'Add'} cup ${index + 1}">Cup ${index + 1}</button>`).join('')}</div></section>`;
+}
+function renderProfileSummary() {
+  const stats = getProfileStats(); if (!stats) return '';
+  return `<section class="card"><div class="card-header"><div><div class="section-label">Physics engine</div><h2>Starting point</h2></div><button class="secondary-button small-button" data-action="profile">Edit</button></div><div class="metric-grid"><div class="metric"><strong>${round(stats.currentBMI, 1)}</strong><span>current BMI</span></div><div class="metric"><strong>${round(stats.targetBMI, 1)}</strong><span>optimal BMI</span></div><div class="metric"><strong>${stats.change ? `${stats.change.toFixed(1)} kg` : 'On target'}</strong><span>to target</span></div></div><details><summary>Timeline projection</summary><div class="list-row"><span>Average · 0.5 kg/week</span><strong>${stats.averageWeeks} weeks</strong></div><div class="list-row"><span>Very optimal · 1 kg/week</span><strong>${stats.optimalWeeks} weeks</strong></div><div class="warning" style="margin-top:13px">WARNING: The optimal timeline is strictly theoretical and is only achievable with absolute discipline, zero missed sessions, and perfect macro adherence.</div></details></section>`;
+}
+
+function renderProfileForm() {
+  const p = state.profile || {};
+  return `<div class="modal-backdrop" data-action="close-modal"><section class="sheet" role="dialog" aria-modal="true" aria-labelledby="profile-title"><div class="sheet-handle"></div><button class="icon-button close" data-action="close-modal" aria-label="Close">×</button><h2 id="profile-title">Your baseline</h2><p>One minute of setup. Stored privately on this device in IndexedDB.</p><div class="sheet-body"><form id="profile-form"><div class="field-grid"><div class="field"><label for="gender">Gender</label><select id="gender"><option value="">Choose one</option><option value="female" ${p.gender === 'female' ? 'selected' : ''}>Female</option><option value="male" ${p.gender === 'male' ? 'selected' : ''}>Male</option><option value="other" ${p.gender === 'other' ? 'selected' : ''}>Prefer not to say</option></select></div><div class="field"><label for="goal">Specific goal</label><select id="goal"><option value="">Choose one</option><option value="muscle" ${p.goal === 'muscle' ? 'selected' : ''}>Muscle mass</option><option value="recomp" ${p.goal === 'recomp' ? 'selected' : ''}>Recomposition</option><option value="fat-loss" ${p.goal === 'fat-loss' ? 'selected' : ''}>Fat loss</option></select></div><div class="field"><label for="weight">Current weight (kg)</label><input id="weight" type="number" min="1" step="0.1" placeholder="e.g. 82.5" value="${p.weight ?? ''}"></div><div class="field"><label for="height">Height (cm)</label><input id="height" type="number" min="1" step="0.1" placeholder="e.g. 178" value="${p.height ?? ''}"></div><div class="field field-full"><label for="targetWeight">Target weight (kg)</label><input id="targetWeight" type="number" min="1" step="0.1" placeholder="75–78 kg" value="${p.targetWeight ?? ''}"></div></div><button class="primary-button" style="margin-top:20px" type="submit">Calculate my plan</button></form></div></section></div>`;
+}
+
+function renderWorkout() {
+  const workout = adjustedWorkout();
+  const session = state.sessions.find(item => item.id === todayKey());
+  const elapsed = state.sessionStarted ? Math.floor((Date.now() - state.sessionStarted) / 1000) : (session?.duration || 0);
+  return `${topbar('Workout', 'TRAIN WITH YOUR ROTATION', 'Workout')}
+    <details class="card"><summary>Rota engine · 4 on / 3 off</summary><p>Tap any future date to override its route. Untouched dates follow your repeating 4-on / 3-off pattern.</p><div class="field" style="margin:14px 0"><label for="rotaAnchor">Pattern starts on</label><input id="rotaAnchor" type="date" value="${state.settings.rotaAnchor || todayKey()}"></div>${renderCalendar()}</details>
+    <section class="card"><div class="card-header"><div><div class="section-label">Today's route · ${getShift(todayKey())} day</div><h2>${workout.title}</h2></div><span class="pill">${workout.duration} min</span></div><p>${getShift(todayKey()) === 'Work' ? '12-hour shift detected. Keep the joints moving, then protect your recovery.' : 'Off-day detected. This is your best window for full training volume.'}</p><div class="button-row"><button class="primary-button" data-action="session-start">${state.sessionStarted ? 'Session running' : 'Start session'}</button><button class="secondary-button" data-action="clear-session">Clear all fields</button></div>${state.sessionStarted ? `<div class="split" style="margin-top:15px"><span class="timer" id="session-timer">${formatDuration(elapsed)}</span><span class="muted">Started ${new Date(state.sessionStarted).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span></div>` : ''}</section>
+    <section class="card"><div class="card-header"><div><div class="section-label">Execution</div><h2>Log each set</h2></div><span class="muted">${state.restTimer ? `Rest ${formatDuration(state.restTimer)}` : state.sessionStarted ? 'Timestamping' : 'Start to timestamp'}</span></div>${state.sessionStarted ? `<div class="field" style="margin-bottom:14px"><label for="session-timestamp">Timestamp · session duration</label><input id="session-timestamp" type="text" readonly value="${formatDuration(elapsed)}"></div>` : ''}${workout.exercises.map((exercise, index) => renderExercise(exercise, index, session)).join('')}<button class="primary-button" data-action="finish-session">Save session</button></section>`;
+}
+function formatDuration(seconds) { return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`; }
+function renderCalendar() {
+  const start = dateFromKey(todayKey()); start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+  const cells = ['M', 'T', 'W', 'T', 'F', 'S', 'S'].map(day => `<div class="weekday">${day}</div>`).join('');
+  const days = Array.from({ length: 14 }, (_, i) => { const d = new Date(start); d.setDate(start.getDate() + i); const key = todayKey(d); return `<button class="day-cell ${key === todayKey() ? 'today' : ''}" data-action="edit-shift" data-date="${key}"><span class="day-number">${d.getDate()}</span><small>${getShift(key)}</small></button>`; }).join('');
+  return `<div class="calendar">${cells}${days}</div>`;
+}
+function renderExercise(exercise, index, session) {
+  const saved = { ...(session?.exercises?.[index] || {}), ...(state.sessionDraft?.[index] || {}) };
+  const swapped = state.sessionSwap?.[index] ?? saved.swapped;
+  const name = swapped ? exercise.alternate : exercise.name;
+  return `<div class="exercise" data-exercise="${index}"><div class="exercise-title"><strong>${esc(name)}</strong><button class="secondary-button small-button" data-action="swap" data-index="${index}">Equipment taken · Swap</button></div><div class="set-grid"><div><label>Weight (kg)</label><input data-field="weight" type="number" step="0.5" min="0" placeholder="kg" value="${saved.weight ?? ''}"></div><div><label>Reps</label><input data-field="reps" type="number" step="1" min="0" placeholder="reps" value="${saved.reps ?? ''}"></div><div><label>Sets</label><input data-field="sets" type="number" step="1" min="0" placeholder="sets" value="${saved.sets ?? ''}"></div></div></div>`;
+}
+
+function renderFuel() {
+  const targets = getDailyTargets(); const consumed = macroConsumed(); const meal = value => Math.round(value / 2); const foods = state.today.foods || [];
+  return `${topbar('Fuel', 'EAT WITH INTENTION', 'Fuel')}<section class="card"><div class="card-header"><div><div class="section-label">OpenFoodFacts</div><h2>Add a food</h2></div><span class="muted">Online lookup</span></div><label for="food-search">Search a barcode database</label><input id="food-search" type="search" autocomplete="off" placeholder="Try: Greek yoghurt, oats, chicken"><div id="food-results">${renderFoodResults()}</div>${state.selectedFood ? `<div class="card" style="margin:12px 0 0;background:#1d1d1d"><div class="split"><div><strong>${esc(state.selectedFood.name)}</strong><p>Per 100 g · ${state.selectedFood.calories || 0} kcal</p><p style="font-size:11px">Protein ${state.selectedFood.protein || 0}g · Carbs ${state.selectedFood.carbs || 0}g · Fats ${state.selectedFood.fats || 0}g</p></div><button class="primary-button small-button" data-action="add-food">Add</button></div></div>` : ''}</section>
+    <section class="card"><div class="card-header"><div><div class="section-label">Daily balance</div><h2>Remaining</h2></div><button class="secondary-button small-button" data-action="clear-fuel">Clear all fields</button></div>${renderMacro('Calories', consumed.calories, targets.calories, 'kcal')}${renderMacro('Protein', consumed.protein, targets.protein, 'g')}${renderMacro('Carbs', consumed.carbs, targets.carbs, 'g')}${renderMacro('Fats', consumed.fats, targets.fats, 'g')}<details><summary>Food logged today (${foods.length})</summary>${foods.length ? foods.map((food, index) => `<div class="list-row"><span>${esc(food.name)}</span><button class="icon-button" data-action="remove-food" data-index="${index}" aria-label="Remove ${esc(food.name)}">×</button></div>`).join('') : '<p>Nothing logged. Search above and press “Add” to start.</p>'}</details></section>
+    <section class="card"><div class="card-header"><div><div class="section-label">Fixed meal pacing</div><h2>Two meals, clearly timed</h2></div></div><div class="list-row"><div><strong>12:00 PM · Lunch</strong><p>Half of each daily target</p></div><span class="pill">${meal(targets.calories)} kcal</span></div><div class="list-row"><div><strong>5:00 PM · Dinner</strong><p>Half of each daily target</p></div><span class="pill">${meal(targets.calories)} kcal</span></div><p style="font-size:12px">Protein ${meal(targets.protein)}g · Carbs ${meal(targets.carbs)}g · Fats ${meal(targets.fats)}g per meal.</p></section>
+    <section class="card"><div class="card-header"><div><div class="section-label">Hydration</div><h2>${state.today.water || 0} of 8 cups</h2></div></div><p>One cup is approximately 250 ml. Tap a cup to mark it complete.</p><div class="water-grid">${Array.from({ length: 8 }, (_, index) => `<button class="water-cup ${(state.today.water || 0) > index ? 'filled' : ''}" data-action="water" data-index="${index}" aria-label="Cup ${index + 1}">Cup ${index + 1}</button>`).join('')}</div><button class="danger-button" style="margin-top:18px" data-action="clear-fuel">Clear all fields</button></section>`;
+}
+function renderMacro(name, value, target, unit) { const percent = target ? Math.min(100, Math.round(value / target * 100)) : 0; return `<div class="macro-row"><span class="macro-name">${name}</span><span class="macro-value">${Math.max(0, target - value)}${unit} left</span><div class="progress"><span style="width:${percent}%"></span></div></div>`; }
+function renderFoodResults() { if (!state.foodResults.length) return ''; return `<div class="card" style="padding:5px 12px;margin:10px 0 0">${state.foodResults.slice(0, 5).map((food, index) => `<button class="list-row" style="width:100%;background:transparent;border:0;text-align:left;cursor:pointer" data-action="select-food" data-index="${index}"><span>${esc(food.name)}</span><span class="muted">${food.calories || 0} kcal</span></button>`).join('')}</div>`; }
+
+function renderProgress() {
+  return `${topbar('Progress', 'SEE THE SIGNAL', 'Progress')}<div class="tabs"><button class="subtab ${state.activitySubtab === 'overview' ? 'active' : ''}" data-action="progress-subtab" data-subtab="overview">Overview</button><button class="subtab ${state.activitySubtab === 'activity' ? 'active' : ''}" data-action="progress-subtab" data-subtab="activity">Activity</button></div>${state.activitySubtab === 'overview' ? renderProgressOverview() : renderActivity()}`;
+}
+function renderProgressOverview() {
+  const points = state.weights.filter(item => item.weight).sort((a, b) => a.id.localeCompare(b.id)); const latest = points.at(-1)?.weight; const average = points.length ? points.slice(-7).reduce((sum, item) => sum + item.weight, 0) / Math.min(points.length, 7) : null; const weekly = points.length > 7 ? average - points.slice(-14, -7).reduce((sum, item) => sum + item.weight, 0) / Math.max(1, points.slice(-14, -7).length) : null; const sessions = state.sessions.filter(item => item.id >= keyForOffset(-6));
+  return `<section class="card"><div class="card-header"><div><div class="section-label">Morning weigh-in</div><h2>Filter the noise</h2></div><span class="pill">7-day average only</span></div><p>Log your weight after waking. D-Shift only shows the seven-day moving average, so daily water changes do not distract you.</p><div class="field"><label for="weight-log">Today's weight (kg)</label><div class="button-row"><input id="weight-log" type="number" min="1" step="0.1" placeholder="e.g. 81.4"><button class="primary-button small-button" data-action="log-weight">Log</button></div></div>${renderWeightChart(points)}</section><section class="card"><div class="card-header"><div><div class="section-label">This week</div><h2>Signals</h2></div></div><div class="stat-list"><div class="metric"><strong>${round(average, 1)} kg</strong><span>7-day average</span></div><div class="metric"><strong>${weekly == null ? '—' : `${weekly > 0 ? '+' : ''}${round(weekly, 1)} kg`}</strong><span>trend vs prior week</span></div><div class="metric"><strong>${sessions.length}</strong><span>sessions logged</span></div><div class="metric"><strong>${points.length}</strong><span>weigh-ins</span></div></div></section><section class="card"><div class="card-header"><div><div class="section-label">Weekly dashboard</div><h2>Next-week actions</h2></div></div><ul class="bullet-list">${weeklyActions(average, weekly, sessions.length, points.length)}</ul></section>`;
+}
+function movingAverage(points) { return points.map((point, index) => { const window = points.slice(Math.max(0, index - 6), index + 1); return { ...point, average: window.reduce((sum, item) => sum + item.weight, 0) / window.length }; }); }
+function renderWeightChart(points) { const values = movingAverage(points.slice(-14)); if (!values.length) return `<div class="chart"><div class="chart-empty">Log seven mornings to reveal a trend</div></div>`; const min = Math.min(...values.map(p => p.average)); const max = Math.max(...values.map(p => p.average)); const range = Math.max(.1, max - min); const coords = values.map((point, index) => `${(index / Math.max(1, values.length - 1)) * 100},${100 - ((point.average - min) / range) * 82 - 9}`).join(' '); return `<div class="chart"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Seven-day moving average chart"><polyline fill="none" stroke="#f6f6f6" stroke-width="1.5" points="${coords}" vector-effect="non-scaling-stroke"/>${values.map((point, index) => `<circle cx="${(index / Math.max(1, values.length - 1)) * 100}" cy="${100 - ((point.average - min) / range) * 82 - 9}" r="1.8" fill="#f6f6f6" vector-effect="non-scaling-stroke"><title>${point.id}: ${point.average.toFixed(1)} kg</title></circle>`).join('')}</svg></div><div class="split muted" style="font-size:11px"><span>${values[0].id}</span><span>${values.at(-1).id}</span></div>`; }
+function weeklyActions(average, weekly, sessions, weighIns) { const actions = []; if (!weighIns) actions.push('Press Log above tomorrow morning to begin your seven-day signal.'); else if (weighIns < 7) actions.push(`Keep logging morning weight for ${7 - weighIns} more day${7 - weighIns === 1 ? '' : 's'} before judging the trend.`); if (sessions < 3) actions.push('Protect three short sessions this week; use the shift-day mobility route when time is tight.'); else actions.push('Your session consistency is building. Add one small rep or load increase on an off-day.'); if (weekly > .3) actions.push('The average is rising. Check meal portions and hit the two fixed meal times consistently.'); else if (weekly < -.8) actions.push('The average is dropping quickly. Add food around training and prioritise recovery.'); else actions.push('The weight signal is stable. Keep protein consistent and focus on progressive volume.'); return actions.map(action => `<li>${action}</li>`).join(''); }
+function renderActivity() { const recent = state.activities.filter(item => item.id >= keyForOffset(-6)); const profileWeight = number(state.profile?.weight); const totalCalories = recent.reduce((sum, item) => sum + (item.calories || 0), 0); const stepAdjustment = Math.round((number(state.today.steps) || 0) * .04); return `<section class="card"><div class="card-header"><div><div class="section-label">Activity log</div><h2>Move on your terms</h2></div></div><p>Calories are estimates using standard MET values and your profile weight. Steps are added separately on Today.</p><form id="activity-form"><div class="field-grid"><div class="field"><label for="activity-type">Activity</label><select id="activity-type"><option value="">Choose one</option><option value="Swimming">Swimming</option><option value="Running">Running</option><option value="Walking">Walking</option></select></div><div class="field"><label for="activity-duration">Duration (minutes)</label><input id="activity-duration" type="number" min="1" step="1" placeholder="e.g. 30"></div></div><button class="primary-button" style="margin-top:15px" type="submit">Log activity</button></form></section><section class="card"><div class="card-header"><div><div class="section-label">Last 7 days</div><h2>Activity signal</h2></div><span class="pill">${Math.round(totalCalories)} kcal</span></div><div class="stat-list"><div class="metric"><strong>${Math.round(totalCalories)}</strong><span>logged exercise kcal</span></div><div class="metric"><strong>${stepAdjustment || '—'}</strong><span>today's step TDEE kcal</span></div></div>${recent.length ? recent.map(item => `<div class="list-row"><span><strong>${esc(item.type)}</strong><small class="muted" style="display:block">${item.duration} minutes · ${item.id}</small></span><span>${Math.round(item.calories)} kcal</span></div>`).join('') : `<div class="empty-state"><strong>No activity logged yet</strong><p>Choose an activity above and press “Log activity” to start adjusting your TDEE.</p></div>`}</section>`; }
+
+function bindView() {
+  $$('.nav-item').forEach(button => button.addEventListener('click', () => { state.tab = button.dataset.tab; render(); }));
+  $$('[data-action="tab"]:not(.nav-item)').forEach(button => button.addEventListener('click', () => { state.tab = button.dataset.tab; render(); }));
+  $$('[data-action="help"]').forEach(button => button.addEventListener('click', () => openHelp(state.tab)));
+  $$('[data-action="profile"]').forEach(button => button.addEventListener('click', () => openModal(renderProfileForm())));
+  $$('[data-action="close-modal"]').forEach(button => button.addEventListener('click', event => { if (event.target === button || button.classList.contains('icon-button')) closeModal(); }));
+  const fatigue = $('#fatigue'); if (fatigue) fatigue.addEventListener('change', async event => { state.today.fatigue = number(event.target.value); await saveToday(); render(); });
+  const steps = $('#steps'); if (steps) steps.addEventListener('change', async event => { state.today.steps = number(event.target.value); await saveToday(); notify('Steps saved'); });
+  $$('[data-action="water"]').forEach(button => button.addEventListener('click', async () => { state.today.water = Number(button.dataset.index) < (state.today.water || 0) ? Number(button.dataset.index) : Number(button.dataset.index) + 1; await saveToday(); render(); }));
+  const profileForm = $('#profile-form'); if (profileForm) profileForm.addEventListener('submit', saveProfile);
+  $$('[data-action="notifications"]').forEach(button => button.addEventListener('click', requestNotifications));
+  const rotaAnchor = $('#rotaAnchor'); if (rotaAnchor) rotaAnchor.addEventListener('change', async event => { state.settings.rotaAnchor = event.target.value; await idbPut('settings', { id: 'app', ...state.settings }); render(); });
+  $$('[data-action="edit-shift"]').forEach(button => button.addEventListener('click', () => openShiftEditor(button.dataset.date)));
+  $$('[data-action="session-start"]').forEach(button => button.addEventListener('click', startSession));
+  $$('[data-action="finish-session"]').forEach(button => button.addEventListener('click', finishSession));
+  $$('[data-action="clear-session"]').forEach(button => button.addEventListener('click', clearSession));
+  $$('[data-action="swap"]').forEach(button => button.addEventListener('click', () => { const exercise = $(`[data-exercise="${button.dataset.index}"]`); const input = exercise.querySelector('[data-field="weight"]'); state.sessionDraft = collectSession(); state.sessionSwap = state.sessionSwap || {}; state.sessionSwap[button.dataset.index] = !state.sessionSwap[button.dataset.index]; render(); const next = $(`[data-exercise="${button.dataset.index}"] [data-field="weight"]`); if (next && input) next.focus(); }));
+  $$('[data-field]').forEach(input => input.addEventListener('change', event => saveSessionDraft(event)));
+  const foodSearch = $('#food-search'); if (foodSearch) foodSearch.addEventListener('input', event => searchFoods(event.target.value));
+  $$('[data-action="select-food"]').forEach(button => button.addEventListener('click', () => { state.selectedFood = state.foodResults[Number(button.dataset.index)]; render(); }));
+  $$('[data-action="add-food"]').forEach(button => button.addEventListener('click', addFood));
+  $$('[data-action="remove-food"]').forEach(button => button.addEventListener('click', async () => { state.today.foods.splice(Number(button.dataset.index), 1); await saveToday(); render(); }));
+  $$('[data-action="clear-fuel"]').forEach(button => button.addEventListener('click', clearFuel));
+  $$('[data-action="progress-subtab"]').forEach(button => button.addEventListener('click', () => { state.activitySubtab = button.dataset.subtab; render(); }));
+  $$('[data-action="log-weight"]').forEach(button => button.addEventListener('click', logWeight));
+  const activityForm = $('#activity-form'); if (activityForm) activityForm.addEventListener('submit', logActivity);
+  if (state.sessionStarted) { clearInterval(state.sessionInterval); state.sessionInterval = setInterval(() => { const timer = $('#session-timer'); if (timer) timer.textContent = formatDuration(Math.floor((Date.now() - state.sessionStarted) / 1000)); }, 1000); }
+}
+
+function openModal(content) { $('#modal-root').innerHTML = content; document.body.style.overflow = 'hidden'; $$('#modal-root [data-action="close-modal"]').forEach(button => button.addEventListener('click', event => { if (event.target === button || button.classList.contains('icon-button')) closeModal(); })); const form = $('#profile-form'); if (form) form.addEventListener('submit', saveProfile); }
+function closeModal() { $('#modal-root').innerHTML = ''; document.body.style.overflow = ''; }
+function openHelp(tab) {
+  const copy = {
+    today: ['A clear next step', 'Today answers “what do I need to do right now?” Log fatigue from your shift and the plan adjusts volume automatically. Use the Fuel and Workout buttons to open the full detail when you are ready.'],
+    workout: ['Train around your rota', 'Off-days carry the heavier strength work; 12-hour shifts get a short mobility reset. Open the rota to change future days, then start a session and log each set.'],
+    fuel: ['Make two meals easy', 'Fuel keeps your macro target and hydration visible without requiring perfect tracking. Search a food above, press Add, and follow the 12 PM and 5 PM split.'],
+    progress: ['Look for trends', 'Progress filters daily fluctuations into a seven-day moving average. Log morning weight or switch to Activity to record movement and see practical actions for next week.']
+  }[tab];
+  openModal(`<div class="modal-backdrop" data-action="close-modal"><section class="sheet" role="dialog" aria-modal="true"><div class="sheet-handle"></div><button class="icon-button close" data-action="close-modal">×</button><h2>${copy[0]}</h2><div class="sheet-body"><p>${copy[1]}</p></div><button class="primary-button" data-action="close-modal">Got it</button></section></div>`);
+  $$('.sheet [data-action="close-modal"]').forEach(button => button.addEventListener('click', closeModal));
+}
+
+async function saveProfile(event) {
+  event.preventDefault();
+  const profile = { id: 'main', gender: $('#gender').value, goal: $('#goal').value, weight: number($('#weight').value), height: number($('#height').value), targetWeight: number($('#targetWeight').value) };
+  if (!profile.gender || !profile.goal || !profile.weight || !profile.height || !profile.targetWeight) { notify('Complete every profile field first'); return; }
+  state.profile = profile; await idbPut('profile', profile); closeModal(); render(); notify('Plan calculated and saved');
+}
+function openShiftEditor(key) {
+  const current = getShift(key);
+  openModal(`<div class="modal-backdrop" data-action="close-modal"><section class="sheet" role="dialog" aria-modal="true"><div class="sheet-handle"></div><button class="icon-button close" data-action="close-modal">×</button><h2>Edit ${prettyDate(key, { weekday: 'long', day: 'numeric', month: 'short' })}</h2><div class="sheet-body"><p>Choose how D-Shift should route this date. This override is stored offline.</p><div class="button-row"><button class="${current === 'Work' ? 'primary' : 'secondary'}-button" data-action="choose-shift" data-date="${key}" data-shift="Work">12-hour shift</button><button class="${current === 'Off' ? 'primary' : 'secondary'}-button" data-action="choose-shift" data-date="${key}" data-shift="Off">Off day</button></div></div></section></div>`);
+  $$('[data-action="choose-shift"]').forEach(button => button.addEventListener('click', async () => { state.settings.shifts[button.dataset.date] = button.dataset.shift; await idbPut('settings', { id: 'app', ...state.settings }); closeModal(); render(); notify(`${button.dataset.shift} day saved`); }));
+}
+function collectSession() {
+  const result = {}; $$('.exercise').forEach((exercise, index) => { result[index] = { ...(state.sessionDraft?.[index] || {}), swapped: Boolean(state.sessionSwap?.[index]), ...Object.fromEntries($$('[data-field]', exercise).map(input => [input.dataset.field, number(input.value)])) }; }); return result;
+}
+async function saveSessionDraft(event) { state.sessionDraft = collectSession(); if (event?.target?.dataset.field && !state.restTimer) startRestTimer(); }
+function startRestTimer() { state.restTimer = 60; clearInterval(state.restInterval); state.restInterval = setInterval(() => { state.restTimer -= 1; const label = $('.card:nth-of-type(3) .card-header .muted'); if (label) label.textContent = state.restTimer > 0 ? `Rest ${formatDuration(state.restTimer)}` : 'Rest complete'; if (state.restTimer <= 0) clearInterval(state.restInterval); }, 1000); }
+function startSession() { if (!state.sessionStarted) state.sessionStarted = Date.now(); render(); notify('Session timer started'); }
+async function finishSession() { const exercises = collectSession(); const duration = state.sessionStarted ? Math.floor((Date.now() - state.sessionStarted) / 1000) : 0; await idbPut('sessionLogs', { id: todayKey(), date: todayKey(), duration, exercises, timestamp: new Date().toISOString() }); state.sessions = await idbAll('sessionLogs'); state.sessionStarted = null; state.sessionDraft = {}; render(); notify('Session saved'); }
+function clearSession() { state.sessionDraft = {}; state.sessionStarted = null; state.sessionSwap = {}; state.restTimer = 0; clearInterval(state.restInterval); render(); notify('Workout fields cleared'); }
+
+async function searchFoods(query) {
+  clearTimeout(state.fuelSearchTimer); if (query.trim().length < 3) { state.foodResults = []; render(); return; }
+  state.fuelSearchTimer = setTimeout(async () => { try { const response = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=5`); const data = await response.json(); state.foodResults = (data.products || []).map(product => ({ name: product.product_name || product.generic_name || 'Unnamed food', calories: Number(product.nutriments?.['energy-kcal_100g'] || 0), protein: Number(product.nutriments?.proteins_100g || 0), carbs: Number(product.nutriments?.carbohydrates_100g || 0), fats: Number(product.nutriments?.fat_100g || 0) })).filter(food => food.name !== 'Unnamed food'); render(); } catch (_) { notify('Food search needs an internet connection'); } }, 450);
+}
+async function addFood() { if (!state.selectedFood) return; state.today.foods = [...(state.today.foods || []), state.selectedFood]; await saveToday(); state.selectedFood = null; state.foodResults = []; render(); notify('Food added'); }
+async function clearFuel() { state.today.foods = []; state.today.water = 0; await saveToday(); render(); notify('Fuel fields cleared'); }
+async function logWeight() { const field = $('#weight-log'); const weight = number(field?.value); if (!weight) { notify('Enter a weight first'); return; } await idbPut('weightLogs', { id: todayKey(), date: todayKey(), weight }); state.weights = await idbAll('weightLogs'); render(); notify('Morning weight saved'); }
+async function logActivity(event) { event.preventDefault(); const type = $('#activity-type').value; const duration = number($('#activity-duration').value); const weight = number(state.profile?.weight); if (!type || !duration || !weight) { notify('Complete activity and profile details first'); return; } const mets = { Walking: 3.5, Running: 9.8, Swimming: 7.0 }; const calories = (mets[type] * 3.5 * weight / 200) * duration; await idbPut('activityLogs', { id: `${todayKey()}-${Date.now()}`, date: todayKey(), type, duration, calories, met: mets[type] }); state.activities = await idbAll('activityLogs'); render(); notify('Activity saved'); }
+
+async function requestNotifications() {
+  if (!('Notification' in window)) { notify('Notifications are not supported here'); return; }
+  try { const permission = await Notification.requestPermission(); if (permission === 'granted') { scheduleNotifications(); notify('Reminders enabled'); } else notify('Reminders remain off'); } catch (_) { notify('Could not enable reminders'); }
+}
+async function registerPWA() {
+  if ('serviceWorker' in navigator) { try { const registration = await navigator.serviceWorker.register('./sw.js'); window.dShiftRegistration = registration; } catch (_) {} }
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (_) {} }
+  if (Notification.permission === 'granted') scheduleNotifications();
+}
+const sentNotifications = new Set();
+function scheduleNotifications() {
+  const check = () => { const now = new Date(); const key = `${todayKey()}-${now.getHours()}:${now.getMinutes()}`; let body = ''; if (now.getHours() === 12 && now.getMinutes() === 0) body = 'Lunch is ready. Hit your first macro target.'; if (now.getHours() === 17 && now.getMinutes() === 0) body = 'Dinner is ready. Close out your fixed meal plan.'; if (now.getMinutes() === 0 && now.getHours() >= 8 && now.getHours() <= 20 && now.getHours() % 2 === 0) body = 'Hydration check. Log a cup of water now.'; if (body && !sentNotifications.has(key)) { sentNotifications.add(key); const message = { type: 'notify', title: 'D-Shift Workouts', body, tag: key }; if (window.dShiftRegistration?.active) window.dShiftRegistration.active.postMessage(message); } }; check(); setInterval(check, 30000); }
+
+async function init() {
+  try {
+    db = await openDB();
+    state.profile = (await idbGet('profile', 'main')) || null;
+    state.settings = (await idbGet('settings', 'app')) || { id: 'app', shifts: {}, rotaAnchor: todayKey() };
+    state.today = (await idbGet('dailyLogs', todayKey())) || { id: todayKey(), foods: [], water: 0 };
+    state.weights = await idbAll('weightLogs'); state.activities = await idbAll('activityLogs'); state.sessions = await idbAll('sessionLogs');
+    render(); registerPWA();
+  } catch (error) { $('#app').innerHTML = `<section class="card empty-state"><strong>Storage unavailable</strong><p>D-Shift needs IndexedDB to keep your offline history private. Please reload in a browser with site storage enabled.</p></section>`; console.error(error); }
+}
+init();
