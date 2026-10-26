@@ -34,7 +34,7 @@ const idbDelete = (store, id) => new Promise((resolve, reject) => { const reques
 
 const state = {
   tab: 'today', profile: null, settings: { shifts: {}, rotaAnchor: null }, today: {}, weights: [], activities: [], sessions: [],
-  foodResults: [], foodQuery: '', selectedFood: null, fuelSearchTimer: null, activitySubtab: 'overview', sessionStarted: null,
+  foodResults: [], foodQuery: '', selectedFood: null, fuelSearchTimer: null, foodRequestId: 0, activitySubtab: 'overview', sessionStarted: null,
   rotaOpen: false,
   restTimer: 0, restInterval: null
 };
@@ -244,7 +244,7 @@ async function finishSession() { const exercises = collectSession(); const durat
 function clearSession() { state.sessionDraft = {}; state.sessionStarted = null; state.sessionSwap = {}; state.restTimer = 0; clearInterval(state.restInterval); render(); notify('Workout fields cleared'); }
 
 async function searchFoods(query) {
-  clearTimeout(state.fuelSearchTimer); if (query.trim().length < 3) { state.foodResults = []; updateFoodDropdown(); return; }
+  clearTimeout(state.fuelSearchTimer); const requestId = ++state.foodRequestId; if (query.trim().length < 3) { state.foodResults = []; updateFoodDropdown(); return; }
   state.fuelSearchTimer = setTimeout(async () => {
     const encodedQuery = encodeURIComponent(query);
     const endpoints = [
@@ -262,12 +262,14 @@ async function searchFoods(query) {
           if (Array.isArray(payload.hits)) { data = payload.hits; break; }
         } catch (_) { /* Try the next official endpoint. */ }
       }
+      if (requestId !== state.foodRequestId || query !== state.foodQuery) return;
       const apiResults = data?.map(product => ({ name: product.product_name || product.product_name_en || product.generic_name || 'Unnamed food', calories: Number(product.nutriments?.['energy-kcal_100g'] || 0), protein: Number(product.nutriments?.proteins_100g || 0), carbs: Number(product.nutriments?.carbohydrates_100g || 0), fats: Number(product.nutriments?.fat_100g || 0) })).filter(food => food.name !== 'Unnamed food') || [];
       const localResults = FOOD_FALLBACKS.filter(food => food.name.toLowerCase().includes(query.trim().toLowerCase()));
       state.foodResults = apiResults.length ? apiResults : localResults;
       if (!state.foodResults.length) throw new Error('Food API unavailable');
       updateFoodDropdown();
     } catch (_) {
+      if (requestId !== state.foodRequestId || query !== state.foodQuery) return;
       state.foodResults = FOOD_FALLBACKS.filter(food => food.name.toLowerCase().includes(query.trim().toLowerCase()));
       updateFoodDropdown();
       if (!state.foodResults.length) notify('No matching food found. Try a broader search.');
